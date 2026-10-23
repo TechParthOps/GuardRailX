@@ -1,0 +1,20 @@
+# runtime data & secrets (never commit)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.pid
+secret_key*
+initial_admin_password*
+*.log
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# local env & tooling
+.env
+.DS_Store
