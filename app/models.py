@@ -38,10 +38,16 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin|researcher|viewer
     disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AuthToken(Base, TimestampMixin):
-    """Sessions and API keys; only hashes are stored."""
+    """Sessions and API keys; only hashes are stored.
+
+    `role` is the credential's privilege CEILING at issuance; the effective
+    role of a request is min(user's current role, token ceiling). `scopes`
+    restricts project-level access: ["*"] or ["project:<id>", ...].
+    """
     __tablename__ = "auth_tokens"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
@@ -50,8 +56,31 @@ class AuthToken(Base, TimestampMixin):
     prefix: Mapped[str] = mapped_column(String(16), default="")
     name: Mapped[str] = mapped_column(String(120), default="")
     role: Mapped[str] = mapped_column(String(20), default="viewer")
+    scopes: Mapped[list] = mapped_column(JSON, default=list)  # ["*"] or ["project:<id>"]
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class UserToken(Base, TimestampMixin):
+    """Single-use account tokens (email verification, password reset)."""
+    __tablename__ = "user_tokens"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)  # verify_email|reset_password
+    token_hash: Mapped[str] = mapped_column(String(128), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProjectMember(Base, TimestampMixin):
+    """Explicit project membership: the basis of resource-level isolation."""
+    __tablename__ = "project_members"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin|researcher|viewer (project-level)
+
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_member"),)
 
 
 class AuditEvent(Base, TimestampMixin):

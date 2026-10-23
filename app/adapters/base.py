@@ -33,7 +33,18 @@ class ModelResponse:
 
 
 class AdapterError(Exception):
-    """Infrastructure-level failure (network, auth, protocol)."""
+    """Infrastructure-level failure (network, auth, protocol).
+
+    `transient=True` marks failures that are safe to retry (429/5xx/timeout/
+    connection). Permanent failures (auth, config, not-found) must never be
+    retried. Retrying only touches idempotent model generation calls — never
+    externally consequential actions.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False, retry_after: float | None = None):
+        super().__init__(message)
+        self.transient = transient
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -74,6 +85,11 @@ class ModelAdapter(ABC):
     @abstractmethod
     def validate_config(self, config: dict[str, Any]) -> tuple[bool, str]:
         """Validate non-secret target config. Fails closed."""
+
+    def validate_config_secure(self, config: dict[str, Any]) -> tuple[bool, str]:
+        """Security-aware validation (endpoint allowlist, credential policy).
+        Used at target registration; adapters with outbound traffic must override."""
+        return self.validate_config(config)
 
     @abstractmethod
     def health_check(self, config: dict[str, Any]) -> HealthResult:

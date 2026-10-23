@@ -20,16 +20,44 @@ class AnthropicAdapter(ModelAdapter):
     notes = ("Anthropic may retain inputs per its usage policy and zero-retention settings; "
              "configure the provider account accordingly for sensitive evaluations.")
 
+    def _credential_env(self, config: dict[str, Any]) -> str:
+        from app.config import get_settings
+        allowed = get_settings().allowed_key_envs_list()
+        env_name = (config.get("api_key_env") or "ANTHROPIC_API_KEY").strip()
+        if env_name not in allowed:
+            raise EndpointPolicyError(
+                f"credential env '{env_name}' is not in the allowed credential list")
+        return env_name
+
     def _resolve_key(self, config: dict[str, Any]) -> str:
-        env_name = config.get("api_key_env", "ANTHROPIC_API_KEY")
-        return os.environ.get(env_name, "") or os.environ.get("ANTHROPIC_API_KEY", "")
+        return os.environ.get(self._credential_env(config), "")
+
+    def _base_url(self, config: dict[str, Any]) -> str:
+        return (config.get("base_url") or "https://api.anthropic.com").rstrip("/")
+
+    def _validate_security(self, config: dict[str, Any]) -> tuple[bool, str]:
+        from app.config import get_settings
+        s = get_settings()
+        ok, detail = self.validate_config(config)
+        if not ok:
+            return False, detail
+        try:
+            env_name = self._credential_env(config)
+        except EndpointPolicyError as exc:
+            return False, str(exc)
+        try:
+            validate_endpoint_url(self._base_url(config), allow_local=s.allow_local_endpoints,
+                                  allowed_hosts=s.allowed_endpoint_hosts_list(),
+                                  credential_env=env_name)
+        except EndpointPolicyError as exc:
+            return False, str(exc)
+        return True, "ok"
 
     def _client(self, config: dict[str, Any]) -> httpx.Client:
-        base = (config.get("base_url") or "https://api.anthropic.com").rstrip("/")
         return httpx.Client(
-            base_url=base,
+            base_url=self._base_url(config),
             headers={"x-api-key": self._resolve_key(config), "anthropic-version": config.get("anthropic_version", "2023-06-01")},
-            timeout=self.timeout_seconds,
+            timeout=httpx.Timeout(self.timeout_seconds, connect=10.0),
         )
 
     def validate_config(self, config: dict[str, Any]) -> tuple[bool, str]:
@@ -37,8 +65,12 @@ class AnthropicAdapter(ModelAdapter):
             return False, "config.model is required"
         return True, "ok"
 
+    def validate_config_secure(self, config: dict[str, Any]) -> tuple[bool, str]:
+        """Endpoint/credential security policy enforced at REGISTRATION time."""
+        return self._validate_security(config)
+
     def health_check(self, config: dict[str, Any]) -> HealthResult:
-        ok, detail = self.validate_config(config)
+        ok, detail = self._validate_security(config)
         if not ok:
             return HealthResult(ok=False, detail=detail)
         start = time.monotonic()
@@ -51,6 +83,8 @@ class AnthropicAdapter(ModelAdapter):
         except httpx.HTTPError as exc:
             return HealthResult(ok=False, detail=f"connection failed: {type(exc).__name__}",
                                 latency_ms=int((time.monotonic() - start) * 1000))
+        except EndpointPolicyError as exc:
+            return HealthResult(ok=False, detail=f"endpoint policy: {exc}")
         latency = int((time.monotonic() - start) * 1000)
         if resp.status_code in (401, 403):
             return HealthResult(ok=False, detail="authentication rejected", latency_ms=latency)
@@ -88,7 +122,7 @@ class AnthropicAdapter(ModelAdapter):
             raise AdapterError(f"request failed: {type(exc).__name__}") from exc
         latency = int((time.monotonic() - start) * 1000)
         if resp.status_code >= 400:
-            raise AdapterError(f"provider HTTP {resp.status_code}: {resp.text[:200]}")
+            raise AdapterError(f"provider HTTP {resp.status_code}")  # body not echoed (may contain account data)
         try:
             data = resp.json()
         except ValueError as exc:

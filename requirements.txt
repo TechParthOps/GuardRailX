@@ -6,3 +6,4 @@ sqlalchemy>=2.0
 httpx>=0.27
 python-multipart>=0.0.9
 email-validator>=2.0
+argon2-cffi>=23.1

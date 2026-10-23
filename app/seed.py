@@ -1,6 +1,12 @@
-"""Bootstrap: admin user, default policy, demo project with a mock target,
-and one real demo experiment executed against the deterministic mock adapter
-(explicitly labeled is_demo). Dashboard data therefore reflects stored results.
+"""Bootstrap and demo seeding.
+
+Security changes (GX-005, GX-006):
+  * NO default administrator identity is created automatically.
+  * The first admin is created ONLY through the explicit setup flow
+    (`python -m app.setup` or POST /api/v1/setup with a one-time token).
+  * Demo data is created ONLY when GX_SEED_DEMO_DATA=true (never in production
+    defaults), and the demo experiment is executed only in that mode.
+  * Built-in scenarios and the default fail-closed policy always exist.
 """
 from __future__ import annotations
 
@@ -20,53 +26,55 @@ log = logging.getLogger("guardrailx.seed")
 
 
 def bootstrap() -> dict:
-    settings = get_settings()
-    admin_email = settings.admin_email
-
+    """Idempotent foundation: policy + builtin scenarios. Creates no users."""
     with session_scope() as s:
-        admin = s.scalar(select(authsvc.User).where(authsvc.User.email == admin_email))
-        if not admin:
-            password = settings.admin_password or ("gx-" + secrets.token_urlsafe(12))
-            admin = authsvc.create_user(admin_email, password, role="admin")
-            if not settings.admin_password:
-                pw_file = settings.data_dir / "initial_admin_password.txt"
-                pw_file.write_text(password, encoding="utf-8")
-                try:
-                    import os
-                    os.chmod(pw_file, 0o600)
-                except OSError:
-                    pass
-                log.warning("initial admin password written to %s (remove after first login)", pw_file)
-            admin_created = True
-        else:
-            admin_created = False
-
         if not s.scalar(select(Policy).where(Policy.name == "default")):
             pol = Policy(id=new_id("pol"), name="default", version=1,
-                         document=DEFAULT_POLICY_DOCUMENT, active=True, created_by=admin.id)
+                         document=DEFAULT_POLICY_DOCUMENT, active=True, created_by="system")
             s.add(pol)
             s.flush()
             orch.load_policies_for_run(pol.id, pol.version, pol.document)
         policy = s.scalar(select(Policy).where(Policy.name == "default", Policy.active == True))  # noqa: E712
 
-        # register builtin scenario library (idempotent)
         from app.models import Scenario as ScenarioModel
         from app.scenarios.library import get_builtin_scenarios
         for scen in get_builtin_scenarios():
             s.merge(ScenarioModel(key=scen["key"], category=scen["category"], title=scen["title"],
                                   description=scen["description"], template=scen["template"],
                                   risk=scen["risk"], source="builtin"))
+        policy_id = policy.id
 
+    orch.load_policies_for_run(policy_id, 1, DEFAULT_POLICY_DOCUMENT)
+    return {"policy_id": policy_id, "admin_created": False}
+
+
+def ensure_demo_data(bootstrap_info: dict) -> dict | None:
+    """Labeled demo project + mock target. Only for explicitly enabled environments."""
+    settings = get_settings()
+    if not settings.seed_demo_data:
+        return None
+    with session_scope() as s:
+        # demo resources need an owner that satisfies the users FK: a disabled
+        # service account, clearly not a human operator
+        sysuser = s.scalar(select(authsvc.User).where(
+            authsvc.User.email == "system@guardrailx.internal"))
+        if not sysuser:
+            sysuser = authsvc.User(id=authsvc.new_id("usr"),
+                                   email="system@guardrailx.internal",
+                                   password_hash=authsvc.hash_password(secrets.token_urlsafe(32)),
+                                   role="viewer", disabled=True, email_verified=False)
+            s.add(sysuser)
+            s.flush()
+        system_id = sysuser.id
         demo = s.scalar(select(Project).where(Project.name == "Demo (mock target)"))
         if not demo:
             demo = Project(id=new_id("prj"), name="Demo (mock target)",
                            description="Labeled demo project using the deterministic mock adapter. "
                                        "All results shown here come from real executed experiment records.",
-                           owner_id=admin.id, is_demo=True)
+                           owner_id=system_id, is_demo=True)
             s.add(demo)
             s.flush()
         project_id = demo.id
-
         mock_target = s.scalar(select(Target).where(Target.project_id == demo.id,
                                                     Target.name == "mock-leaky-assistant"))
         if not mock_target:
@@ -80,26 +88,23 @@ def bootstrap() -> dict:
             s.add(mock_target)
             s.flush()
         target_id = mock_target.id
-        policy_id = policy.id
-
-    orch.load_policies_for_run(policy_id, 1, DEFAULT_POLICY_DOCUMENT)
-    return {"admin_created": admin_created, "admin_email": admin_email,
-            "project_id": project_id, "target_id": target_id, "policy_id": policy_id}
+    return {"project_id": project_id, "target_id": target_id,
+            "policy_id": bootstrap_info["policy_id"]}
 
 
-async def run_demo_experiment(bootstrap_info: dict) -> str | None:
+async def run_demo_experiment(demo_info: dict) -> str | None:
     """Execute one real experiment against the mock adapter (labeled demo data)."""
-    from app.models import Experiment
     from sqlalchemy import select as _select
+    from app.models import Experiment
     with session_scope() as s:
         existing = s.scalar(_select(Experiment).where(Experiment.title == "Demo: canary leak evaluation"))
         if existing:
             return existing.id
     try:
         result = orch.create_experiment(
-            project_id=bootstrap_info["project_id"],
-            target_id=bootstrap_info["target_id"],
-            policy_id=bootstrap_info["policy_id"],
+            project_id=demo_info["project_id"],
+            target_id=demo_info["target_id"],
+            policy_id=demo_info["policy_id"],
             scenario_keys=["inj.direct.override", "inj.indirect.retrieved_doc",
                            "tool.unauthorized_delete", "tool.egress_no_approval",
                            "tool.sandbox_escape", "rag.poisoned_corpus",

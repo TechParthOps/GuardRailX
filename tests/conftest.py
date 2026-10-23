@@ -6,27 +6,32 @@ TMP = tempfile.mkdtemp(prefix="gx_test_")
 os.environ["GX_DATA_DIR"] = TMP
 os.environ["GX_SANDBOX_DIR"] = os.path.join(TMP, "sandbox")
 os.environ["GX_DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "test.db").replace("\\", "/")
-os.environ["GX_ADMIN_PASSWORD"] = "test-admin-password-123"
 os.environ["GX_ENVIRONMENT"] = "development"
 os.environ["GX_CASE_REPLAYS"] = "2"
+os.environ["GX_SETUP_TOKEN"] = "test-setup-token-0123456789"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-
-@pytest.fixture(scope="session")
-def app():
-    from app.main import create_app
-    from app.seed import bootstrap
-    bootstrap()
-    yield create_app()
+ADMIN_EMAIL = "admin@test.local"
+ADMIN_PASSWORD = "test-admin-password-A1"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _database(app):
     """Ensure every test session has a migrated, bootstrapped database."""
     yield
+
+
+@pytest.fixture(scope="session")
+def app():
+    from app.main import create_app
+    from app.seed import bootstrap
+    from app.setup import setup_from_token
+    bootstrap()
+    setup_from_token(os.environ["GX_SETUP_TOKEN"], ADMIN_EMAIL, ADMIN_PASSWORD)
+    yield create_app()
 
 
 @pytest.fixture(scope="session")
@@ -38,7 +43,7 @@ def client(app):
 @pytest.fixture(scope="session")
 def admin_headers(client):
     r = client.post("/api/v1/auth/login",
-                    json={"email": "admin@guardrailx.local", "password": "test-admin-password-123"})
+                    json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert r.status_code == 200, r.text
     return {"Authorization": "Bearer " + r.json()["access_token"]}
 
@@ -47,10 +52,10 @@ def admin_headers(client):
 def researcher_headers(client, admin_headers):
     r = client.post("/api/v1/auth/users", headers=admin_headers,
                     json={"email": "researcher@guardrailx.local",
-                          "password": "researcher-pass-123", "role": "researcher"})
+                          "password": "Researcher-Pass-123", "role": "researcher"})
     assert r.status_code in (200, 409)
     r = client.post("/api/v1/auth/login",
-                    json={"email": "researcher@guardrailx.local", "password": "researcher-pass-123"})
+                    json={"email": "researcher@guardrailx.local", "password": "Researcher-Pass-123"})
     assert r.status_code == 200, r.text
     return {"Authorization": "Bearer " + r.json()["access_token"]}
 
@@ -59,10 +64,10 @@ def researcher_headers(client, admin_headers):
 def viewer_headers(client, admin_headers):
     r = client.post("/api/v1/auth/users", headers=admin_headers,
                     json={"email": "viewer@guardrailx.local",
-                          "password": "viewer-pass-12345", "role": "viewer"})
+                          "password": "Viewer-Pass-12345", "role": "viewer"})
     assert r.status_code in (200, 409)
     r = client.post("/api/v1/auth/login",
-                    json={"email": "viewer@guardrailx.local", "password": "viewer-pass-12345"})
+                    json={"email": "viewer@guardrailx.local", "password": "Viewer-Pass-12345"})
     assert r.status_code == 200, r.text
     return {"Authorization": "Bearer " + r.json()["access_token"]}
 
@@ -102,3 +107,13 @@ def run_experiment_sync(exp_id):
     import asyncio
     from app.experiments import orchestrator as orch
     asyncio.run(orch.run_experiment(exp_id))
+
+@pytest.fixture(autouse=True)
+def _clear_auth_rate_store():
+    """Auth rate limits are per-IP; tests share one client IP. Clear before and
+    after each test so unrelated tests stay deterministic (the dedicated
+    rate-limit test fills and asserts the mechanism itself)."""
+    from app.api.v1 import routes
+    routes._rate_store.clear()
+    yield
+    routes._rate_store.clear()

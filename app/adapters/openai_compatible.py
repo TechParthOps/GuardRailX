@@ -1,7 +1,13 @@
-"""OpenAI-compatible adapter (OpenAI, vLLM, Ollama /v1, OpenRouter, Groq, Azure gateways).
+"""OpenAI-compatible adapter (OpenAI, vLLM, Ollama /v1, OpenRouter, Groq, gateways).
 
-Credential comes from the environment (OPENAI_API_KEY or target config
-`api_key_env` naming another env var); it is never persisted with the target.
+Security (GX-003 fix):
+  * base_url must be the trusted endpoint for the selected credential OR an
+    administrator-allowlisted host; loopback/private/metadata IPs refused
+    unless GX_ALLOW_LOCAL_ENDPOINTS is explicitly enabled by the operator.
+  * `api_key_env` is restricted to an explicit allowlist of credential env
+    var names — no arbitrary environment access.
+  * Credentials are resolved per request from the environment; never stored.
+  * Redirects are re-validated hop-by-hop; response size is capped.
 """
 from __future__ import annotations
 
@@ -13,28 +19,68 @@ from typing import Any
 import httpx
 
 from app.adapters.base import AdapterError, AdapterRequest, HealthResult, ModelResponse, ModelAdapter
+from app.adapters.netguard import EndpointPolicyError, validate_endpoint_url
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
     name = "openai_compatible"
-    version = "1.0.0"
+    version = "1.1.0"
     supported_models = ["*"]  # validated against the live endpoint during health check
     auth_requirements = ["OPENAI_API_KEY"]
     modalities = ["text"]
     supports_tool_calling = True
-    supports_streaming = False  # streaming not used by the evaluation engine yet
+    supports_streaming = False
     notes = ("Provider may log/retain prompts depending on account settings. "
-             "Point base_url at a local/vLLM/Ollama endpoint to avoid external retention.")
+             "Point base_url at an administrator-allowlisted local/vLLM/Ollama endpoint "
+             "to avoid external retention.")
+
+    # ------------------------------------------------------------ credentials
 
     def _resolve_key(self, config: dict[str, Any]) -> str:
-        env_name = config.get("api_key_env", "OPENAI_API_KEY")
-        return os.environ.get(env_name, "") or os.environ.get("OPENAI_API_KEY", "")
+        env_name = self._credential_env(config)
+        return os.environ.get(env_name, "")
+
+    def _credential_env(self, config: dict[str, Any]) -> str:
+        """Only allowlisted credential env vars may be selected (no arbitrary env access)."""
+        from app.config import get_settings
+        allowed = get_settings().allowed_key_envs_list()
+        env_name = (config.get("api_key_env") or "OPENAI_API_KEY").strip()
+        if env_name not in allowed:
+            raise EndpointPolicyError(
+                f"credential env '{env_name}' is not in the allowed credential list")
+        return env_name
+
+    def _base_url(self, config: dict[str, Any]) -> str:
+        return (config.get("base_url") or "").rstrip("/") or "https://api.openai.com/v1"
+
+    def _validate_security(self, config: dict[str, Any]) -> tuple[bool, str]:
+        from app.config import get_settings
+        s = get_settings()
+        ok, detail = self.validate_config(config)
+        if not ok:
+            return False, detail
+        try:
+            env_name = self._credential_env(config)
+        except EndpointPolicyError as exc:
+            return False, str(exc)
+        try:
+            validate_endpoint_url(self._base_url(config), allow_local=s.allow_local_endpoints,
+                                  allowed_hosts=s.allowed_endpoint_hosts_list(),
+                                  credential_env=env_name)
+        except EndpointPolicyError as exc:
+            return False, str(exc)
+        return True, "ok"
+
+    # ------------------------------------------------------------ http client
 
     def _client(self, config: dict[str, Any]) -> httpx.Client:
-        base = (config.get("base_url") or "").rstrip("/") or "https://api.openai.com/v1"
+        base = self._base_url(config)
         key = self._resolve_key(config)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        return httpx.Client(base_url=base, headers=headers, timeout=self.timeout_seconds)
+        return httpx.Client(base_url=base, headers=headers,
+                            timeout=httpx.Timeout(self.timeout_seconds, connect=10.0))
+
+    # ------------------------------------------------------------ contract
 
     def validate_config(self, config: dict[str, Any]) -> tuple[bool, str]:
         if not config.get("model"):
@@ -46,8 +92,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return False, "api_key_env must be an env var name"
         return True, "ok"
 
+    def validate_config_secure(self, config: dict[str, Any]) -> tuple[bool, str]:
+        """Endpoint/credential security policy enforced at REGISTRATION time."""
+        return self._validate_security(config)
+
     def health_check(self, config: dict[str, Any]) -> HealthResult:
-        ok, detail = self.validate_config(config)
+        ok, detail = self._validate_security(config)
         if not ok:
             return HealthResult(ok=False, detail=detail)
         start = time.monotonic()
@@ -57,18 +107,19 @@ class OpenAICompatibleAdapter(ModelAdapter):
         except httpx.HTTPError as exc:
             return HealthResult(ok=False, detail=f"connection failed: {type(exc).__name__}",
                                 latency_ms=int((time.monotonic() - start) * 1000))
+        except EndpointPolicyError as exc:
+            return HealthResult(ok=False, detail=f"endpoint policy: {exc}")
         latency = int((time.monotonic() - start) * 1000)
         if resp.status_code in (401, 403):
             return HealthResult(ok=False, detail="authentication rejected (check API key env var)", latency_ms=latency)
         if resp.status_code == 404:
-            # endpoint without /models still may serve chat; require a probe instead
             return HealthResult(ok=False, detail="/models not found; endpoint incompatible with health test", latency_ms=latency)
         if resp.status_code >= 400:
             return HealthResult(ok=False, detail=f"health check HTTP {resp.status_code}", latency_ms=latency)
         return HealthResult(ok=True, detail=f"endpoint reachable (HTTP {resp.status_code})", latency_ms=latency)
 
     def generate(self, request: AdapterRequest, config: dict[str, Any]) -> ModelResponse:
-        ok, detail = self.validate_config(config)
+        ok, detail = self._validate_security(config)
         if not ok:
             raise AdapterError(f"invalid adapter config: {detail}")
         payload: dict[str, Any] = {
@@ -88,12 +139,26 @@ class OpenAICompatibleAdapter(ModelAdapter):
         start = time.monotonic()
         try:
             with self._client(config) as client:
+                client.follow_redirects = False
                 resp = client.post("/chat/completions", json=payload)
+        except httpx.HTTPStatusError as exc:
+            raise AdapterError(f"request failed: {type(exc).__name__}", transient=False) from exc
         except httpx.HTTPError as exc:
-            raise AdapterError(f"request failed: {type(exc).__name__}") from exc
+            raise AdapterError(f"request failed: {type(exc).__name__}", transient=True) from exc
         latency = int((time.monotonic() - start) * 1000)
+        if resp.status_code == 429:
+            retry_after = None
+            try:
+                retry_after = float(resp.headers.get("retry-after", "")) or None
+            except ValueError:
+                pass
+            raise AdapterError("provider rate limited (HTTP 429)", transient=True,
+                               retry_after=retry_after)
+        if resp.status_code >= 500:
+            raise AdapterError(f"provider server error (HTTP {resp.status_code})", transient=True)
         if resp.status_code >= 400:
-            raise AdapterError(f"provider HTTP {resp.status_code}: {resp.text[:200]}")
+            # never echo the provider body (may contain account identifiers)
+            raise AdapterError(f"provider HTTP {resp.status_code}")
         try:
             data = resp.json()
         except ValueError as exc:

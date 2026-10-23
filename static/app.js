@@ -54,13 +54,14 @@ function renderNav(active) {
 
 async function viewDashboard(el) {
   const [stats, exps, events, benchmarks] = await Promise.all([
-    api("/admin/stats"), api("/experiments"),
+    api("/dashboard/summary"), api("/experiments"),
     api("/events?limit=12"), api("/benchmarks"),
   ]);
+  const tOperational = stats.targets_operational ?? 0, tTotal = stats.targets ?? 0;
   el.innerHTML = `
     <h1>Dashboard</h1>
     <div class="cards">
-      <div class="card ok"><div class="num">${stats.targets_operational}/${stats.targets}</div><div class="lbl">Operational targets</div></div>
+      <div class="card ok"><div class="num">${tOperational}/${tTotal}</div><div class="lbl">Operational targets</div></div>
       <div class="card"><div class="num">${stats.experiments_running}</div><div class="lbl">Running experiments</div></div>
       <div class="card"><div class="num">${stats.findings_total}</div><div class="lbl">Findings (all)</div></div>
       <div class="card crit"><div class="num">${stats.findings_by_severity?.critical || 0}</div><div class="lbl">Critical findings</div></div>
@@ -71,7 +72,7 @@ async function viewDashboard(el) {
       <div class="panel"><h3>Recent experiments</h3>
         <table><tr><th>ID</th><th>Title</th><th>Status</th><th>Findings</th></tr>
         ${exps.slice(0, 8).map(e => `<tr>
-          <td><a class="link" href="#/explorer/${e.id}">${esc(e.id.slice(0, 14))}…</a></td>
+          <td><a class="link" href="#/explorer/${esc(e.id)}">${esc(e.id.slice(0, 14))}…</a></td>
           <td>${esc(e.title)}</td><td>${badge(e.status)}</td>
           <td>${e.stats?.findings ?? 0}</td></tr>`).join("") || "<tr><td colspan=4 class=muted>none</td></tr>"}
         </table></div>
@@ -191,7 +192,7 @@ async function viewLab(el) {
         <td>${esc(e.title)}</td><td>${badge(e.status)}</td>
         <td>${e.stats?.cases_done ?? 0}/${e.stats?.cases_total ?? 0}</td>
         <td class="mono" style="font-size:11px">${esc(JSON.stringify(e.stats?.outcomes || {}))}</td>
-        <td><a class="link" href="#/explorer/${e.id}">inspect</a>
+        <td><a class="link" href="#/explorer/${esc(e.id)}">inspect</a>
             ${["created", "running", "paused"].includes(e.status) ? ` · <a class="link" data-cancel="${esc(e.id)}">cancel</a>` : ""}</td>
       </tr>`).join("")}</table></div>`;
   el.querySelector("#x-run").onclick = async () => {
@@ -235,7 +236,7 @@ async function viewExplorer(el, expId) {
     el.innerHTML = `<h1>Live Execution Explorer</h1>
       <div class="panel"><h3>Experiments</h3><table>
       <tr><th>ID</th><th>Title</th><th>Status</th><th>Started</th></tr>
-      ${exps.map(e => `<tr><td><a class="link" href="#/explorer/${e.id}">${esc(e.id)}</a></td>
+      ${exps.map(e => `<tr><td><a class="link" href="#/explorer/${esc(e.id)}">${esc(e.id)}</a></td>
         <td>${esc(e.title)}</td><td>${badge(e.status)}</td><td class="muted">${esc((e.started_at || "").slice(0, 19))}</td></tr>`).join("")}
       </table></div>`;
     return;
@@ -478,26 +479,70 @@ async function viewAudit(el) {
 
 /* ------------------------------------------------------------------ login */
 
-function viewLogin(el) {
+function viewLogin(el, setupInfo) {
+  const notice = setupInfo && setupInfo.setup_required
+    ? `<div class="panel mt8" style="border-color: var(--warn)"><strong>First run:</strong> no administrator exists yet.
+        Run <span class="mono">python -m app.setup</span> on the server, or use the one-time
+        <span class="mono">POST /api/v1/setup</span> endpoint with the operator's GX_SETUP_TOKEN.</div>`
+    : "";
   el.innerHTML = `<div class="login-box panel">
     <h1 style="margin-top:0">Sign in to GUARDRAIL-X</h1>
-    <label>Email</label><input id="l-email" value="admin@guardrailx.local">
-    <label>Password</label><input id="l-pass" type="password">
-    <div class="row mt8"><button class="btn" id="l-btn">Sign in</button></div>
+    ${notice}
+    <label for="l-email">Email</label><input id="l-email" autocomplete="username" placeholder="you@example.com">
+    <label for="l-pass">Password</label><input id="l-pass" type="password" autocomplete="current-password">
+    <div class="row mt8"><button class="btn" id="l-btn">Sign in</button>
+      ${setupInfo && setupInfo.signup_enabled ? '<a class="link" href="#/signup">Create an account</a>' : ""}</div>
     <div id="l-msg" class="error-text hidden"></div>
-    <p class="muted" style="font-size:12px">First run: the generated admin password is printed to
-    <span class="mono">data/initial_admin_password.txt</span>.</p></div>`;
-  const doLogin = async () => {
+    <p class="muted" style="font-size:12px">Accounts are provisioned by signup (if enabled) or by an administrator.</p></div>`;
+  const doLogin = async (btn) => {
     const msg = el.querySelector("#l-msg");
+    btn.disabled = true; btn.textContent = "Signing in…";
     try {
       const r = await api("/auth/login", {method: "POST", body: JSON.stringify({
-        email: el.querySelector("#l-email").value, password: el.querySelector("#l-pass").value})});
+        email: el.querySelector("#l-email").value.trim(), password: el.querySelector("#l-pass").value})});
       setSession(r.access_token, r.role, r.email);
       route();
     } catch (e) { msg.textContent = e.message; msg.classList.remove("hidden"); }
+    btn.disabled = false; btn.textContent = "Sign in";
   };
-  el.querySelector("#l-btn").onclick = doLogin;
-  el.querySelector("#l-pass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+  el.querySelector("#l-btn").onclick = e => doLogin(e.target);
+  el.querySelector("#l-pass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(el.querySelector("#l-btn")); });
+}
+
+function viewSignup(el) {
+  el.innerHTML = `<div class="login-box panel">
+    <h1 style="margin-top:0">Create your account</h1>
+    <label for="s-email">Email</label><input id="s-email" autocomplete="email" placeholder="you@example.com">
+    <label for="s-pass">Password</label><input id="s-pass" type="password" autocomplete="new-password">
+    <div class="muted" style="font-size:12px">At least 12 characters with upper case, lower case, and a digit.</div>
+    <label for="s-pass2">Confirm password</label><input id="s-pass2" type="password" autocomplete="new-password">
+    <div class="row mt8"><button class="btn" id="s-btn">Sign up</button>
+      <a class="link" href="#/login">Back to sign-in</a></div>
+    <div id="s-msg" class="error-text hidden"></div>
+    <div id="s-ok" class="hidden mt8"><span class="badge b-pass">Account created</span>
+      <span id="s-ok-text" class="muted"></span></div></div>`;
+  const doSignup = async (btn) => {
+    const msg = el.querySelector("#s-msg");
+    const ok = el.querySelector("#s-ok");
+    msg.classList.add("hidden"); ok.classList.add("hidden");
+    const pass = el.querySelector("#s-pass").value;
+    if (pass !== el.querySelector("#s-pass2").value) {
+      msg.textContent = "passwords do not match"; msg.classList.remove("hidden"); return;
+    }
+    btn.disabled = true; btn.textContent = "Creating…";
+    try {
+      const r = await api("/auth/signup", {method: "POST", body: JSON.stringify({
+        email: el.querySelector("#s-email").value.trim(), password: pass,
+        password_confirm: el.querySelector("#s-pass2").value})});
+      ok.classList.remove("hidden");
+      el.querySelector("#s-ok-text").textContent = r.verification_required
+        ? " Verification required — ask the operator for your verification token (out-of-band delivery)."
+        : " You can sign in now.";
+      btn.textContent = "Signed up";
+    } catch (e) { msg.textContent = e.message; msg.classList.remove("hidden"); }
+    btn.disabled = false; if (btn.textContent === "Creating…") btn.textContent = "Sign up";
+  };
+  el.querySelector("#s-btn").onclick = e => doSignup(e.target);
 }
 
 /* ------------------------------------------------------------------ router */
@@ -510,7 +555,12 @@ async function route() {
   if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
   el.innerHTML = '<div class="loading">Loading…</div>';
   try {
-    if (!TOKEN) return viewLogin(el);
+    if (!TOKEN) {
+      if (page === "signup") return viewSignup(el);
+      let setupInfo = {setup_required: false, signup_enabled: false};
+      try { setupInfo = await api("/setup/status"); } catch {}
+      return viewLogin(el, setupInfo);
+    }
     switch (page || "dashboard") {
       case "dashboard": return await viewDashboard(el);
       case "targets": return await viewTargets(el);

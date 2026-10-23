@@ -52,6 +52,51 @@ def emergency_stop_active() -> bool:
     return _EMERGENCY_STOP
 
 
+def generate_with_retry(adapter, request: AdapterRequest, config: dict[str, Any],
+                        *, max_retries: int = 2, timeout_seconds: float) -> Any:
+    """Idempotent model generation with bounded exponential backoff + jitter.
+
+    Only transient provider failures are retried (429/5xx/timeouts/connection).
+    Retry-After is honored when provided. Consequential actions (tool calls)
+    are never retried here — they pass through the gateway separately.
+    """
+    import random
+    attempt = 0
+    while True:
+        try:
+            return adapter.generate(request, config)
+        except AdapterError as exc:
+            if not getattr(exc, "transient", False) or attempt >= max_retries:
+                raise
+            delay = min(8.0, (2 ** attempt) * 0.5)
+            if exc.retry_after:
+                delay = max(delay, min(exc.retry_after, 30.0))
+            time.sleep(delay + random.uniform(0, 0.25 * delay))
+            attempt += 1
+
+
+async def _generate_with_retry_async(adapter, request: AdapterRequest,
+                                     config: dict[str, Any],
+                                     timeout_seconds: float) -> Any:
+    import random
+    max_retries = 2
+    attempt = 0
+    while True:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(generate_with_retry, adapter, request, config,
+                                  max_retries=0, timeout_seconds=timeout_seconds),
+                timeout=timeout_seconds)
+        except AdapterError as exc:
+            if not getattr(exc, "transient", False) or attempt >= max_retries:
+                raise
+            delay = min(8.0, (2 ** attempt) * 0.5)
+            if exc.retry_after:
+                delay = max(delay, min(exc.retry_after, 30.0))
+            await asyncio.sleep(delay + random.uniform(0, 0.25 * delay))
+            attempt += 1
+
+
 def load_policies_for_run(policy_id: str, version: int, document: dict[str, Any]) -> None:
     policy_engine.load(policy_id, version, document)
 
@@ -348,9 +393,9 @@ async def _run_case(experiment_id: str, seq: int, scenario_key: str, scenario: d
         if followup is not None:
             adapter_request.messages.append({"role": "user", "content": followup})
         try:
-            resp = await asyncio.wait_for(
-                asyncio.to_thread(adapter.generate, adapter_request, _target_config(experiment_id)),
-                timeout=get_settings().case_timeout_seconds)
+            resp = await _generate_with_retry_async(
+                adapter, adapter_request, _target_config(experiment_id),
+                timeout_seconds=get_settings().case_timeout_seconds)
         except AdapterError as exc:
             adapter_error = str(exc)
             break

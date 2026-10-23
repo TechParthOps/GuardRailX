@@ -3,7 +3,8 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: guardrailx
-      POSTGRES_PASSWORD: ${GX_PG_PASSWORD:-changeme-pg}
+      # supply GX_PG_PASSWORD in your environment; never commit real values
+      POSTGRES_PASSWORD: ${GX_PG_PASSWORD:?GX_PG_PASSWORD is required}
       POSTGRES_DB: guardrailx
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -12,6 +13,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # database is NOT published to the host (app reaches it over the compose network)
 
   app:
     build: .
@@ -19,15 +21,24 @@ services:
       db:
         condition: service_healthy
     environment:
-      GX_DATABASE_URL: postgresql+psycopg2://guardrailx:${GX_PG_PASSWORD:-changeme-pg}@db:5432/guardrailx
+      GX_DATABASE_URL: postgresql+psycopg2://guardrailx:${GX_PG_PASSWORD}@db:5432/guardrailx
       GX_ENVIRONMENT: production
-      GX_ADMIN_PASSWORD: ${GX_ADMIN_PASSWORD:-}
+      GX_SECRET_KEY: ${GX_SECRET_KEY:?GX_SECRET_KEY is required (python -c "import secrets; print(secrets.token_urlsafe(48))")}
+      GX_CORS_ORIGINS: ${GX_CORS_ORIGINS:?GX_CORS_ORIGINS required (explicit origins)}
+      GX_SETUP_TOKEN: ${GX_SETUP_TOKEN:-}
+      GX_ALLOW_SIGNUP: ${GX_ALLOW_SIGNUP:-true}
+      GX_REQUIRE_EMAIL_VERIFICATION: ${GX_REQUIRE_EMAIL_VERIFICATION:-false}
+      GX_ALLOWED_ENDPOINT_HOSTS: ${GX_ALLOWED_ENDPOINT_HOSTS:-}
+      GX_ALLOW_LOCAL_ENDPOINTS: ${GX_ALLOW_LOCAL_ENDPOINTS:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:
       - appdata:/data
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   pgdata:

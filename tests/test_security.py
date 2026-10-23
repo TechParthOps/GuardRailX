@@ -79,19 +79,22 @@ def test_redact_obj_masks_sensitive_fields_and_nested():
     assert out["list"][0]["authorization"] == "[REDACTED]"
 
 
-def test_api_key_roundtrip(client, viewer_headers, admin_headers):
+def test_api_key_roundtrip(client, viewer_headers, admin_headers, researcher_headers):
+    # viewers can no longer mint credentials at all (GX-001 remediation)
     r = client.post("/api/v1/auth/api-keys", headers=viewer_headers, json={"name": "test key"})
+    assert r.status_code == 403
+    # researchers can mint keys with their own effective role
+    r = client.post("/api/v1/auth/api-keys", headers=researcher_headers, json={"name": "test key"})
     assert r.status_code == 200
     key = r.json()["api_key"]
     assert key.startswith("gx_")
     # usable
     r = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {key}"})
     assert r.status_code == 200
-    key_id = r.json()["user_id"]
     # revocation works
-    keys = client.get("/api/v1/auth/api-keys", headers=viewer_headers).json()
+    keys = client.get("/api/v1/auth/api-keys", headers=researcher_headers).json()
     kid = keys[0]["id"]
-    assert client.delete(f"/api/v1/auth/api-keys/{kid}", headers=viewer_headers).status_code == 200
+    assert client.delete(f"/api/v1/auth/api-keys/{kid}", headers=researcher_headers).status_code == 200
     r = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {key}"})
     assert r.status_code == 401
 
@@ -100,6 +103,17 @@ def test_viewers_cannot_mint_elevated_keys(client, viewer_headers):
     r = client.post("/api/v1/auth/api-keys", headers=viewer_headers,
                     json={"name": "escalate", "role": "admin"})
     assert r.status_code == 403
+
+
+def test_researcher_key_cannot_escalate_nor_mint_for_others(client, researcher_headers):
+    # explicit elevation request is blocked and audited (GX-001)
+    r = client.post("/api/v1/auth/api-keys", headers=researcher_headers,
+                    json={"name": "try-admin", "role": "admin"})
+    assert r.status_code == 403
+    # default key = creator's effective role (researcher), never account drift
+    r = client.post("/api/v1/auth/api-keys", headers=researcher_headers,
+                    json={"name": "own-role"})
+    assert r.status_code == 200 and r.json()["role"] == "researcher"
 
 
 def test_events_do_not_leak_secrets(client, admin_headers, researcher_headers, project_id):

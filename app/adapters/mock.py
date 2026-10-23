@@ -55,7 +55,7 @@ class MockAdapter(ModelAdapter):
         behavior = config.get("behavior", "refuse")
 
         if behavior == "flaky" and CALL_COUNT[key] <= int(config.get("flaky_failures", 1)):
-            raise AdapterError("mock transient failure")
+            raise AdapterError("mock transient failure", transient=True)
 
         last_user = self._last_user_text(request)
         raw = json.dumps({"m": request.messages}, default=str)

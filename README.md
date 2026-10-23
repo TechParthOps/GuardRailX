@@ -14,18 +14,30 @@ It evaluates how LLMs and agents respond to adversarial inputs, policy conflicts
 # 1. Python 3.11+ and install dependencies
 pip install -r requirements.txt -r requirements-dev.txt
 
-# 2. Run the automated test suite
+# 2. Run the automated test suite (128 tests incl. Playwright browser tests)
 $env:PYTHONPATH = "<repo path>"; python -m pytest tests -q
 
-# 3. Start the platform (kills any previous instance on the port automatically)
+# 3. Create the FIRST administrator (no default identity ships with the app)
+python -m app.setup            # interactive: email + password
+#    or via API: set GX_SETUP_TOKEN, then POST /api/v1/setup (one-time)
+
+# 4. Start the platform (kills any previous instance on the port automatically)
 .\run.ps1            # or: .\run.ps1 -Port 9000
 
-# 4. Open the dashboard and sign in
+# 5. Open the dashboard and sign in
 #    http://127.0.0.1:8899
-#    admin password: data/initial_admin_password.txt (generated on first run; delete the file after login)
+#    Users can self-register at #/signup (GX_ALLOW_SIGNUP, role: viewer; admins
+#    grant roles afterwards). Demo data only when GX_SEED_DEMO_DATA=true.
 #
 # If the browser ever shows a stale page, hard-refresh with Ctrl+F5.
 ```
+
+**Security posture (hardened release):** no default admin identity; Argon2id password hashing
+with transparent legacy upgrade; effective-privilege ceiling on every credential (a scoped key
+can never mint a wider one); project-level isolation on every resource route; SSRF allowlist for
+provider endpoints with credential-host binding; honest benchmark states (`failed` when the
+provider is unavailable); per-route auth rate limits; CSP and security headers. Full details:
+[Security Audit Report](docs/SECURITY_AUDIT_REPORT.md), [Issue Register](docs/ISSUE_REGISTER.md).
 
 Optional `.env`: copy `.env.example` to `.env`. Adding `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) enables real-provider targets — a target only becomes **operational** after a passing connection test.
 
@@ -68,4 +80,4 @@ The control plane (policy, approvals, experiments) is separate from the executio
 
 ## Test status
 
-`67 passed` (pytest) — policy engine, gateway enforcement, adapters (incl. OpenAI-compatible over mocked HTTP), orchestrator E2E, findings/regression, benchmarks, RBAC, redaction, emergency stop. A **live-provider evaluation** was also executed against `gemini-flash-lite-latest` (Google's OpenAI-compatible endpoint): safety-core 0% injection success, tool-boundary suite produced 2 agent-layer findings where the real model attempted unauthorized actions and the enforcement gateway blocked both. See `docs/SAMPLE_REPORT.md` and `docs/SECURITY_LIMITATIONS.md`.
+Hardened release: **128 passed** (pytest, incl. Playwright browser tests) covering the policy engine, enforcement gateway, adapters (OpenAI-compatible over mocked HTTP), orchestrator E2E, findings/regression, benchmarks, RBAC, project isolation, SSRF boundaries, redaction, emergency stop, and real-browser workflows. Live-provider evidence: `docs/TEST_REPORT.md`, `docs/SAMPLE_REPORT.md`, `docs/SECURITY_LIMITATIONS.md`.

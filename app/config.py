@@ -19,12 +19,24 @@ class Settings(BaseSettings):
     database_url: str = ""  # empty -> derived sqlite path under data_dir
     session_ttl_minutes: int = 720
     api_key_ttl_days: int = 365
-    admin_email: str = "admin@guardrailx.local"
-    admin_password: str = ""  # if empty, generated once and written to data/initial_admin_password.txt
+    # --- identity bootstrap (secure setup; NO default admin identity) -------
+    admin_email: str = ""      # set only by the operator via setup flow
+    admin_password: str = ""   # consumed by setup flow; never persisted
+    setup_token: str = ""      # one-time token guarding POST /api/v1/setup (web bootstrap)
+    # --- account policies ---------------------------------------------------
+    allow_signup: bool = True              # public registration toggle
+    require_email_verification: bool = False  # enable for production with out-of-band delivery
+    # --- content & seeding --------------------------------------------------
+    seed_demo_data: bool = False           # demo project/experiment; OFF by default
+    enable_docs: bool | None = None        # None -> enabled in development, disabled in production
     secret_key: str = ""  # if empty, generated and persisted under data_dir
     log_level: str = "INFO"
     cors_origins: str = "*"  # dev convenience; set explicit origins in production
-    # Orchestration limits
+    # --- outbound provider security (GX-003) --------------------------------
+    allowed_key_envs: str = "OPENAI_API_KEY,ANTHROPIC_API_KEY,GEMINI_API_KEY,NVIDIA_API_KEY"
+    allowed_endpoint_hosts: str = ""       # admin-approved extra hosts (comma-separated)
+    allow_local_endpoints: bool = False    # explicit opt-in for loopback/private model servers
+    # --- orchestration limits
     max_concurrent_experiments: int = 4
     max_cases_per_experiment: int = 100
     case_timeout_seconds: int = 120
@@ -48,6 +60,31 @@ class Settings(BaseSettings):
         if self.database_url:
             return self.database_url
         return f"sqlite:///{(self.data_dir / 'guardrailx.db').as_posix()}"
+
+    @property
+    def docs_enabled(self) -> bool:
+        if self.enable_docs is not None:
+            return self.enable_docs
+        return self.environment != "production"
+
+    def production_config_errors(self) -> list[str]:
+        """Critical configuration that must be present before production serving."""
+        errors = []
+        if self.environment != "production":
+            return errors
+        if not self.secret_key:
+            errors.append("GX_SECRET_KEY must be set explicitly in production")
+        if self.cors_origins == "*":
+            errors.append("GX_CORS_ORIGINS must list explicit trusted origins in production")
+        if self.seed_demo_data:
+            errors.append("GX_SEED_DEMO_DATA must be false in production")
+        return errors
+
+    def allowed_key_envs_list(self) -> list[str]:
+        return [x.strip() for x in self.allowed_key_envs.split(",") if x.strip()]
+
+    def allowed_endpoint_hosts_list(self) -> list[str]:
+        return [x.strip().lower() for x in self.allowed_endpoint_hosts.split(",") if x.strip()]
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
