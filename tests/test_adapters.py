@@ -52,10 +52,15 @@ def test_mock_flaky_raises_then_succeeds():
 # ------------------------------------------------- openai-compatible (HTTP)
 
 def _client_factory(handler):
-    def factory(config):
-        base = (config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
-        return httpx.Client(base_url=base, transport=httpx.MockTransport(handler))
-    return factory
+    """Returns a `_pinned(config) -> (client, ip)` replacement bound to a
+    MockTransport client on the default OpenAI base URL."""
+    client = httpx.Client(base_url="https://api.openai.com/v1",
+                          headers={"Authorization": "Bearer test-key"},
+                          transport=httpx.MockTransport(handler), follow_redirects=False)
+
+    def pinned(_config):
+        return client, "93.184.216.34"
+    return pinned
 
 
 def test_openai_health_ok(monkeypatch):
@@ -63,7 +68,7 @@ def test_openai_health_ok(monkeypatch):
         assert request.url.path == "/v1/models"
         return httpx.Response(200, json={"data": [{"id": "gpt-test"}]})
     a = OpenAICompatibleAdapter()
-    monkeypatch.setattr(a, "_client", _client_factory(handler))
+    monkeypatch.setattr(a, "_pinned", _client_factory(handler))
     h = a.health_check({"model": "gpt-test"})
     assert h.ok and h.latency_ms >= 0
 
@@ -72,7 +77,7 @@ def test_openai_health_auth_rejected(monkeypatch):
     def handler(request):
         return httpx.Response(401, json={"error": "bad key"})
     a = OpenAICompatibleAdapter()
-    monkeypatch.setattr(a, "_client", _client_factory(handler))
+    monkeypatch.setattr(a, "_pinned", _client_factory(handler))
     h = a.health_check({"model": "gpt-test"})
     assert not h.ok and "authentication" in h.detail
 
@@ -81,7 +86,7 @@ def test_openai_health_connection_failure(monkeypatch):
     def handler(request):
         raise httpx.ConnectError("refused")
     a = OpenAICompatibleAdapter()
-    monkeypatch.setattr(a, "_client", _client_factory(handler))
+    monkeypatch.setattr(a, "_pinned", _client_factory(handler))
     h = a.health_check({"model": "gpt-test"})
     assert not h.ok and "connection failed" in h.detail
 
@@ -96,7 +101,7 @@ def test_openai_generate_parses_tool_calls(monkeypatch):
                     "name": "sim_fs.read", "arguments": '{"path": "sandbox://x.txt"}'}}]}}],
             "usage": {"total_tokens": 12}})
     a = OpenAICompatibleAdapter()
-    monkeypatch.setattr(a, "_client", _client_factory(handler))
+    monkeypatch.setattr(a, "_pinned", _client_factory(handler))
     r = a.generate(AdapterRequest(messages=[{"role": "user", "content": "hi"}],
                                   tools=[{"name": "sim_fs.read"}]),
                    {"model": "m"})
@@ -108,7 +113,7 @@ def test_openai_generate_provider_error(monkeypatch):
     def handler(request):
         return httpx.Response(500, text="boom")
     a = OpenAICompatibleAdapter()
-    monkeypatch.setattr(a, "_client", _client_factory(handler))
+    monkeypatch.setattr(a, "_pinned", _client_factory(handler))
     with pytest.raises(AdapterError):
         a.generate(AdapterRequest(messages=[{"role": "user", "content": "hi"}]), {"model": "m"})
 

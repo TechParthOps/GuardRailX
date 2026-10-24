@@ -75,3 +75,24 @@ the environment â€” never in target configs or the database.
 - **API keys**: ceiling-enforced (`role` + `scopes`); a key can never mint a credential above its own effective privileges; shown exactly once.
 - **Email verification**: enable `GX_REQUIRE_EMAIL_VERIFICATION=true` for production; tokens are delivered out-of-band (SMTP is not implemented — documented limitation).
 - **Demo data removal**: `python scripts/cleanup_demo_data.py --dry-run` then `--execute --backup <file> [--revoke-all-credentials]`.
+## Deployment model (Phase 11): single-process by design
+
+The current release is a **single-process deployment**:
+
+- Rate limiting (global + per-auth-route) is in-memory per process.
+- The SSE live-event bus is in-memory per process.
+- Experiment execution runs as asyncio tasks inside the serving process.
+
+Run exactly ONE uvicorn worker (default of `run.ps1` / compose `CMD`). Running
+`--workers N > 1` or multiple replicas gives inconsistent rate limits, missing
+live events, and duplicated experiment tasks — the app logs a warning at startup
+if it detects a multi-worker environment via `GX_EXPECTED_WORKERS`.
+
+Scaling out is a roadmap item (Redis-backed limiter/bus + queue-based
+orchestration, see the original roadmap in this document) and requires tests
+proving throttling, authorization, and event delivery remain correct across
+workers before any horizontal-scalability claim.
+
+Reverse-proxy guidance: terminate TLS, forward `X-Forwarded-For` ONLY from
+trusted proxies, and apply proxy-level body-size limits as defense in depth
+(the app enforces its own 1 MiB cap independently).

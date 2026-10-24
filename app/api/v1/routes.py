@@ -80,10 +80,14 @@ def web_setup(body: S.SetupRequest) -> dict[str, Any]:
 
 @router.get("/setup/status", tags=["setup"])
 def setup_status() -> dict[str, Any]:
-    """Used by the UI to decide whether to show the setup wizard."""
-    with session_scope() as s:
-        n = s.query(authsvc.User).count()
-    return {"setup_required": n == 0,
+    """Used by the UI to decide whether to show the setup wizard.
+
+    setup_required = NO ACTIVE ADMINISTRATOR exists (single shared definition
+    with the setup handler; a registered viewer without an admin still counts
+    as "setup required").
+    """
+    from app.setup import _setup_completed
+    return {"setup_required": not _setup_completed(),
             "signup_enabled": get_settings().allow_signup}
 
 
@@ -308,11 +312,13 @@ def revoke_api_key(key_id: str, principal: Principal = Depends(require_viewer)) 
 # --------------------------------------------------- account-token delivery
 
 def _deliver_account_token(email: str, kind: str, raw_token: str) -> None:
-    """Token delivery. SMTP/email sending is NOT implemented; tokens reach the
-    operator console out-of-band (documented limitation). Never included in
-    request logs (redaction masks them; this is deliberate)."""
-    logging.getLogger("guardrailx.auth.delivery").warning(
-        "account token issued (out-of-band delivery) - kind=%s account=%s", kind, email)
+    """Real delivery (Phase 5). Failures raise so the endpoint never claims
+    success. Tokens never appear in logs, audit records, or API responses."""
+    from app.mailer import DeliveryError, send_account_token
+    try:
+        send_account_token(email, kind, raw_token)
+    except DeliveryError as exc:
+        raise HTTPException(503, str(exc))
 
 
 # ------------------------------------------------------- resource isolation
@@ -1155,6 +1161,33 @@ def list_users(principal: Principal = Depends(require_admin)) -> list[dict[str, 
                  "email_verified": u.email_verified, "created_at": str(u.created_at)} for u in rows]
 
 
+def _active_admin_count(s) -> int:
+    return s.query(authsvc.User).filter(authsvc.User.role == "admin",
+                                        authsvc.User.disabled == False).count()  # noqa: E712
+
+
+def _guard_not_last_admin(s, user_id: str, principal: Principal) -> None:
+    """Phase 7: the last ACTIVE administrator cannot be demoted/disabled.
+
+    Atomicity: on PostgreSQL a transaction-scoped advisory lock serializes
+    concurrent role changes; on SQLite the single-writer commit serializes
+    them. The count check and the update share the caller's transaction, so
+    two concurrent demotions can never remove the final active admin.
+    """
+    from sqlalchemy import text as _text
+    from app.db import _is_postgres
+    if _is_postgres():
+        s.execute(_text(f"SELECT pg_advisory_xact_lock({736_251_003})"))
+    target = s.get(authsvc.User, user_id)
+    if not target or target.role != "admin" or target.disabled:
+        return  # demoting a non-admin / already-disabled user is unconstrained
+    if _active_admin_count(s) <= 1:
+        # audit in a SEPARATE transaction: this one is about to roll back
+        authsvc.audit(principal.email, "admin.last_admin_protected", "user", user_id,
+                      {"action": "role_or_disable_change"})
+        raise HTTPException(409, "cannot demote or disable the last active administrator")
+
+
 @router.post("/admin/users/{user_id}/role", tags=["admin"])
 def change_role(user_id: str, body: S.RoleChangeRequest,
                 principal: Principal = Depends(require_admin)) -> dict[str, Any]:
@@ -1162,6 +1195,7 @@ def change_role(user_id: str, body: S.RoleChangeRequest,
         u = s.get(authsvc.User, user_id)
         if not u:
             raise HTTPException(404, "user not found")
+        _guard_not_last_admin(s, user_id, principal)
         old = u.role
         u.role = body.role
     revoked = 0
@@ -1175,12 +1209,14 @@ def change_role(user_id: str, body: S.RoleChangeRequest,
 @router.post("/admin/users/{user_id}/disable", tags=["admin"])
 def disable_user(user_id: str, body: S.DisableRequest,
                  principal: Principal = Depends(require_admin)) -> dict[str, Any]:
-    if user_id == principal.id:
-        raise HTTPException(409, "cannot disable your own account")
+    if user_id == principal.id and body.disabled:
+        raise HTTPException(409, "cannot disable your own account; ask another administrator")
     with session_scope() as s:
         u = s.get(authsvc.User, user_id)
         if not u:
             raise HTTPException(404, "user not found")
+        if body.disabled:
+            _guard_not_last_admin(s, user_id, principal)
         u.disabled = body.disabled
     revoked = 0
     if body.disabled:

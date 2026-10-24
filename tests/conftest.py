@@ -117,3 +117,32 @@ def _clear_auth_rate_store():
     routes._rate_store.clear()
     yield
     routes._rate_store.clear()
+
+
+@pytest.fixture(autouse=True)
+def _offline_dns_guard(monkeypatch):
+    """When GX_OFFLINE_TEST=1, ANY real DNS resolution inside a test fails
+    immediately (Phase 9: ordinary suites must not need internet access).
+    Loopback/IP-literal hosts remain resolvable for local fixtures."""
+    import ipaddress as _ipaddress
+    if os.environ.get("GX_OFFLINE_TEST") != "1":
+        yield
+        return
+
+    import socket as _socket
+    real = _socket.getaddrinfo
+
+    def offline_getaddrinfo(host, port, *a, **kw):
+        try:
+            _ipaddress.ip_address(host)
+            return real(host, port, *a, **kw)  # IP literals fine (localhost fixtures)
+        except ValueError:
+            pass
+        if host in ("localhost", "127.0.0.1", "::1", "testserver"):
+            return real(host, port, *a, **kw)
+        raise AssertionError(
+            f"offline test suite attempted DNS resolution for '{host}' — "
+            "unit/regression tests must be deterministic (mock network access)")
+
+    monkeypatch.setattr(_socket, "getaddrinfo", offline_getaddrinfo)
+    yield

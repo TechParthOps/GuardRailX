@@ -21,7 +21,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      GX_DATABASE_URL: postgresql+psycopg2://guardrailx:${GX_PG_PASSWORD}@db:5432/guardrailx
+      GX_DATABASE_URL: postgresql+psycopg://guardrailx:${GX_PG_PASSWORD}@db:5432/guardrailx
       GX_ENVIRONMENT: production
       GX_SECRET_KEY: ${GX_SECRET_KEY:?GX_SECRET_KEY is required (python -c "import secrets; print(secrets.token_urlsafe(48))")}
       GX_CORS_ORIGINS: ${GX_CORS_ORIGINS:?GX_CORS_ORIGINS required (explicit origins)}

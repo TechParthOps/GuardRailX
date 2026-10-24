@@ -46,15 +46,18 @@ def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
     return False
 
 
-def validate_endpoint_url(url: str, *, allow_local: bool, allowed_hosts: list[str],
-                          credential_env: str | None = None) -> str:
-    """Validate an outbound URL; returns the normalized host. Raises
-    EndpointPolicyError with a safe (non-sensitive) message on violation."""
+def validate_endpoint_policy(url: str, *, allowed_hosts: list[str],
+                             credential_env: str | None = None) -> str:
+    """Policy-only validation (NO DNS): scheme, userinfo, fragments, host
+    allowlist, credential-to-host binding. Returns the normalized host.
+
+    Used on fast validation paths (target registration, config checks); full
+    resolution + IP pinning happens in app.adapters.pinned at connection time.
+    """
     try:
         parsed = urlparse(url)
     except ValueError as exc:
         raise EndpointPolicyError("invalid URL") from exc
-
     if parsed.scheme not in ("http", "https"):
         raise EndpointPolicyError("only http(s) endpoints are allowed")
     if parsed.username or parsed.password:
@@ -67,25 +70,32 @@ def validate_endpoint_url(url: str, *, allow_local: bool, allowed_hosts: list[st
 
     trusted = CREDENTIAL_TRUSTED_HOSTS.get(credential_env or "") if credential_env else None
     allowlist = [h.lower() for h in allowed_hosts]
-    host_allowed = (trusted is not None and host == trusted) or host in allowlist
-    if not host_allowed:
+    if not ((trusted is not None and host == trusted) or host in allowlist):
         raise EndpointPolicyError(
             f"endpoint host '{host}' is not a trusted provider endpoint and is not in "
             "the administrator allowlist")
+    return host
 
-    # DNS resolution + IP validation (anti-rebinding: resolve now, connect later
-    # is accepted because the allowlist is host-based and hop-validated)
+
+def validate_endpoint_url(url: str, *, allow_local: bool, allowed_hosts: list[str],
+                          credential_env: str | None = None) -> str:
+    """Validate + resolve + IP-check (DNS used; prefer pinned_client for the
+    connect-time guarantee)."""
+    host = validate_endpoint_policy(url, allowed_hosts=allowed_hosts,
+                                    credential_env=credential_env)
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
-                                   proto=socket.IPPROTO_TCP)
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise EndpointPolicyError(f"endpoint host '{host}' cannot be resolved") from exc
+    except ValueError as exc:
+        raise EndpointPolicyError("invalid URL") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if _ip_is_forbidden(ip, allow_local):
             raise EndpointPolicyError(
                 "endpoint resolves to a forbidden address (private/loopback/metadata)")
-
     return host
 
 

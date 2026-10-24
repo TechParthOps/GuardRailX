@@ -1,11 +1,11 @@
 """FastAPI application assembly: middleware, security headers, static dashboard.
 
-Hardening (Parts 6, 8, 9, 10):
+Hardening:
   * Production startup REFUSES insecure critical configuration (fail-closed).
-  * Demo seeding only when GX_SEED_DEMO_DATA=true; never auto-runs experiments
-    otherwise.
+  * Demo seeding only when GX_SEED_DEMO_DATA=true; never auto-runs experiments.
   * OpenAPI/docs gated by environment (GX_ENABLE_DOCS overrides).
-  * Strict Content-Security-Policy and additional security headers.
+  * Strict CSP and security headers on every response (incl. 413/429).
+  * Request-body limit enforced WHILE RECEIVING (covers chunked bodies).
 """
 from __future__ import annotations
 
@@ -25,9 +25,26 @@ from app.observability.logging_setup import setup_logging
 
 log = logging.getLogger("guardrailx.app")
 
+MAX_BODY_BYTES = 1_048_576  # 1 MiB request cap (Phase 8)
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
        "form-action 'self'")
+
+
+def _security_headers(response, settings) -> None:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = CSP
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if settings.environment == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+
+
+def _reject(status: int, detail: str) -> JSONResponse:
+    resp = JSONResponse({"detail": detail}, status_code=status)
+    _security_headers(resp, get_settings())
+    return resp
 
 
 @asynccontextmanager
@@ -44,6 +61,9 @@ async def lifespan(app: FastAPI):
         import asyncio
         asyncio.create_task(run_demo_experiment(demo))
         log.warning("demo data seeded (GX_SEED_DEMO_DATA=true) - never enable in production")
+    if get_settings().environment == "production":
+        log.warning("single-process deployment: run exactly ONE worker; in-memory rate "
+                    "limiting and the SSE bus are not shared across workers (docs/OPERATIONS.md)")
     yield
 
 
@@ -55,7 +75,7 @@ def create_app() -> FastAPI:
     migrate()
 
     app_kwargs: dict = dict(
-        title=settings.app_name, version="1.1.0",
+        title=settings.app_name, version="1.2.0",
         description="Universal AI guardrail research, bypass, and evaluation platform")
     if settings.docs_enabled:
         app_kwargs.update(docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -76,20 +96,23 @@ def create_app() -> FastAPI:
         while window and now - window[0] > 60:
             window.popleft()
         if len(window) >= settings.rate_limit_per_minute and request.url.path.startswith("/api/"):
-            return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
-        # request size guard (Part 6: oversized requests)
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > 1_048_576:
-            return JSONResponse({"detail": "request body too large"}, status_code=413)
+            return _reject(429, "rate limit exceeded")
+
+        # Request-body limit (Phase 8): enforced while RECEIVING the body, so
+        # chunked/streamed requests without Content-Length are also bounded.
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+            return _reject(413, "request body too large")
+        if request.method in ("POST", "PUT", "PATCH") and request.url.path.startswith("/api/"):
+            body = b""
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > MAX_BODY_BYTES:
+                    return _reject(413, "request body too large")
+            request._body = body  # noqa: SLF001 — cache the bounded body for downstream
 
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = CSP
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        if settings.environment == "production":
-            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        _security_headers(response, settings)
         log.info("%s %s -> %s (%.0fms)", request.method, request.url.path,
                  response.status_code, (time.monotonic() - start) * 1000)
         return response

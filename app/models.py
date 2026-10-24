@@ -8,8 +8,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index,
-                        Integer, String, Text, UniqueConstraint)
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, func, Index,
+                        Integer, String, Text, text, UniqueConstraint)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -26,7 +26,7 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
 
 # ---------------------------------------------------------------- identity
@@ -37,8 +37,8 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin|researcher|viewer
-    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class AuthToken(Base, TimestampMixin):
@@ -58,7 +58,7 @@ class AuthToken(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(20), default="viewer")
     scopes: Mapped[list] = mapped_column(JSON, default=list)  # ["*"] or ["project:<id>"]
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class UserToken(Base, TimestampMixin):
@@ -99,9 +99,9 @@ class Project(Base, TimestampMixin):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
-    description: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
-    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 # --------------------------------------------------------------- targets
@@ -116,7 +116,7 @@ class Target(Base, TimestampMixin):
     config: Mapped[dict] = mapped_column(JSON, default=dict)  # non-secret config only
     status: Mapped[str] = mapped_column(String(20), default="unverified")  # unverified|operational|failed
     last_health: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=func.now())
 
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_target_name"),)
 
@@ -130,7 +130,7 @@ class Policy(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120))
     version: Mapped[int] = mapped_column(Integer, default=1)
     document: Mapped[dict] = mapped_column(JSON)
-    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), index=True)
     created_by: Mapped[str] = mapped_column(String(40), default="")
 
     __table_args__ = (UniqueConstraint("name", "version", name="uq_policy_name_version"),)
@@ -143,7 +143,7 @@ class Scenario(Base, TimestampMixin):
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     category: Mapped[str] = mapped_column(String(40), index=True)  # injection|jailbreak|tool|rag|policy|multimodal|regression
     title: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
     template: Mapped[dict] = mapped_column(JSON)  # messages/params/expected contract
     risk: Mapped[int] = mapped_column(Integer, default=30)
     source: Mapped[str] = mapped_column(String(20), default="builtin")  # builtin|custom|regression
@@ -246,7 +246,7 @@ class Finding(Base, TimestampMixin):
     reproduction: Mapped[dict] = mapped_column(JSON, default=dict)
     failure_layer: Mapped[str] = mapped_column(String(24), default="model")  # model|agent|enforcement
     reproducible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=func.now())
 
 
 class Regression(Base, TimestampMixin):

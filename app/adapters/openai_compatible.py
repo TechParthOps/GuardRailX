@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from app.adapters.base import AdapterError, AdapterRequest, HealthResult, ModelResponse, ModelAdapter
-from app.adapters.netguard import EndpointPolicyError, validate_endpoint_url
+from app.adapters.netguard import EndpointPolicyError, validate_endpoint_policy
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -63,8 +63,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
             env_name = self._credential_env(config)
         except EndpointPolicyError as exc:
             return False, str(exc)
+        if not self._resolve_key(config):
+            return False, f"credential '{env_name}' is not set in the environment"
         try:
-            validate_endpoint_url(self._base_url(config), allow_local=s.allow_local_endpoints,
+            validate_endpoint_policy(self._base_url(config),
                                   allowed_hosts=s.allowed_endpoint_hosts_list(),
                                   credential_env=env_name)
         except EndpointPolicyError as exc:
@@ -73,12 +75,21 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     # ------------------------------------------------------------ http client
 
-    def _client(self, config: dict[str, Any]) -> httpx.Client:
+    def _pinned(self, config: dict[str, Any]) -> tuple[httpx.Client, str]:
+        """Build a connection-pinned client (Phase 4): DNS resolved once under
+        policy; the transport dials the validated IP (no rebinding TOCTOU)."""
+        from app.adapters.pinned import pinned_client
+        from app.config import get_settings
+        s = get_settings()
         base = self._base_url(config)
+        env_name = self._credential_env(config)
         key = self._resolve_key(config)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        return httpx.Client(base_url=base, headers=headers,
-                            timeout=httpx.Timeout(self.timeout_seconds, connect=10.0))
+        return pinned_client(base, headers=headers,
+                             timeout=httpx.Timeout(self.timeout_seconds, connect=10.0),
+                             allow_local=s.allow_local_endpoints,
+                             allowed_hosts=s.allowed_endpoint_hosts_list(),
+                             credential_env=env_name)
 
     # ------------------------------------------------------------ contract
 
@@ -102,7 +113,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return HealthResult(ok=False, detail=detail)
         start = time.monotonic()
         try:
-            with self._client(config) as client:
+            client, _ip = self._pinned(config)
+            with client:
                 resp = client.get("/models")
         except httpx.HTTPError as exc:
             return HealthResult(ok=False, detail=f"connection failed: {type(exc).__name__}",
@@ -138,8 +150,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             } for t in request.tools]
         start = time.monotonic()
         try:
-            with self._client(config) as client:
-                client.follow_redirects = False
+            client, _ip = self._pinned(config)
+            with client:
                 resp = client.post("/chat/completions", json=payload)
         except httpx.HTTPStatusError as exc:
             raise AdapterError(f"request failed: {type(exc).__name__}", transient=False) from exc

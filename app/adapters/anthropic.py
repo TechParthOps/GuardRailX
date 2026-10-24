@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.adapters.base import AdapterError, AdapterRequest, HealthResult, ModelResponse, ModelAdapter
+from app.adapters.netguard import EndpointPolicyError, validate_endpoint_policy
 
 
 class AnthropicAdapter(ModelAdapter):
@@ -45,20 +46,38 @@ class AnthropicAdapter(ModelAdapter):
             env_name = self._credential_env(config)
         except EndpointPolicyError as exc:
             return False, str(exc)
+        if not self._resolve_key(config):
+            return False, f"credential '{env_name}' is not set in the environment"
         try:
-            validate_endpoint_url(self._base_url(config), allow_local=s.allow_local_endpoints,
+            validate_endpoint_policy(self._base_url(config),
                                   allowed_hosts=s.allowed_endpoint_hosts_list(),
                                   credential_env=env_name)
         except EndpointPolicyError as exc:
             return False, str(exc)
         return True, "ok"
 
-    def _client(self, config: dict[str, Any]) -> httpx.Client:
-        return httpx.Client(
-            base_url=self._base_url(config),
-            headers={"x-api-key": self._resolve_key(config), "anthropic-version": config.get("anthropic_version", "2023-06-01")},
-            timeout=httpx.Timeout(self.timeout_seconds, connect=10.0),
-        )
+    MAX_RESPONSE_BYTES = 2_000_000
+
+    def _pinned(self, config: dict[str, Any]) -> tuple[httpx.Client, str]:
+        """Connection-pinned client (Phase 4): DNS resolved once under policy."""
+        from app.adapters.pinned import pinned_client
+        from app.config import get_settings
+        s = get_settings()
+        return pinned_client(self._base_url(config),
+                             headers={"x-api-key": self._resolve_key(config),
+                                      "anthropic-version": config.get("anthropic_version", "2023-06-01")},
+                             timeout=httpx.Timeout(self.timeout_seconds, connect=10.0),
+                             allow_local=s.allow_local_endpoints,
+                             allowed_hosts=s.allowed_endpoint_hosts_list(),
+                             credential_env=self._credential_env(config))
+
+    @staticmethod
+    def _check_response_size(resp: httpx.Response) -> None:
+        declared = resp.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > AnthropicAdapter.MAX_RESPONSE_BYTES:
+            raise AdapterError("provider response exceeds size limit")
+        if len(resp.content) > AnthropicAdapter.MAX_RESPONSE_BYTES:
+            raise AdapterError("provider response exceeds size limit")
 
     def validate_config(self, config: dict[str, Any]) -> tuple[bool, str]:
         if not config.get("model"):
@@ -75,7 +94,8 @@ class AnthropicAdapter(ModelAdapter):
             return HealthResult(ok=False, detail=detail)
         start = time.monotonic()
         try:
-            with self._client(config) as client:
+            client, _ip = self._pinned(config)
+            with client:
                 resp = client.post("/v1/messages", json={
                     "model": config["model"], "max_tokens": 1,
                     "messages": [{"role": "user", "content": "ping"}],
@@ -95,7 +115,7 @@ class AnthropicAdapter(ModelAdapter):
         return HealthResult(ok=True, detail="endpoint reachable", latency_ms=latency)
 
     def generate(self, request: AdapterRequest, config: dict[str, Any]) -> ModelResponse:
-        ok, detail = self.validate_config(config)
+        ok, detail = self._validate_security(config)
         if not ok:
             raise AdapterError(f"invalid adapter config: {detail}")
         system_parts = ([request.system] if request.system else []) + [
@@ -116,13 +136,27 @@ class AnthropicAdapter(ModelAdapter):
             } for t in request.tools]
         start = time.monotonic()
         try:
-            with self._client(config) as client:
+            client, _ip = self._pinned(config)
+            with client:
                 resp = client.post("/v1/messages", json=payload)
         except httpx.HTTPError as exc:
-            raise AdapterError(f"request failed: {type(exc).__name__}") from exc
+            raise AdapterError(f"request failed: {type(exc).__name__}", transient=True) from exc
+        except EndpointPolicyError as exc:
+            raise AdapterError(f"endpoint policy: {exc}") from exc
         latency = int((time.monotonic() - start) * 1000)
+        if resp.status_code == 429:
+            retry_after = None
+            try:
+                retry_after = float(resp.headers.get("retry-after", "")) or None
+            except ValueError:
+                pass
+            raise AdapterError("provider rate limited (HTTP 429)", transient=True,
+                               retry_after=retry_after)
+        if resp.status_code >= 500:
+            raise AdapterError(f"provider server error (HTTP {resp.status_code})", transient=True)
         if resp.status_code >= 400:
             raise AdapterError(f"provider HTTP {resp.status_code}")  # body not echoed (may contain account data)
+        self._check_response_size(resp)
         try:
             data = resp.json()
         except ValueError as exc:

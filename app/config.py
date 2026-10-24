@@ -25,7 +25,19 @@ class Settings(BaseSettings):
     setup_token: str = ""      # one-time token guarding POST /api/v1/setup (web bootstrap)
     # --- account policies ---------------------------------------------------
     allow_signup: bool = True              # public registration toggle
-    require_email_verification: bool = False  # enable for production with out-of-band delivery
+    require_email_verification: bool = False  # enable for production with SMTP delivery
+    # --- account-token delivery (Phase 5) -----------------------------------
+    email_mode: str = "console"            # console (dev) | smtp
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_use_tls: bool = True              # STARTTLS
+    smtp_use_ssl: bool = False             # implicit TLS (port 465)
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "guardrailx@localhost"
+    smtp_timeout_seconds: float = 15.0
+    verification_token_ttl_minutes: int = 60 * 24
+    reset_token_ttl_minutes: int = 60
     # --- content & seeding --------------------------------------------------
     seed_demo_data: bool = False           # demo project/experiment; OFF by default
     enable_docs: bool | None = None        # None -> enabled in development, disabled in production
@@ -78,6 +90,12 @@ class Settings(BaseSettings):
             errors.append("GX_CORS_ORIGINS must list explicit trusted origins in production")
         if self.seed_demo_data:
             errors.append("GX_SEED_DEMO_DATA must be false in production")
+        # Phase 5: never promise verification/reset flows without real delivery
+        if self.require_email_verification or self.email_mode == "smtp":
+            from app.mailer import delivery_ready
+            ok, why = delivery_ready()
+            if not ok:
+                errors.append(f"email delivery misconfigured: {why}")
         return errors
 
     def allowed_key_envs_list(self) -> list[str]:

@@ -176,28 +176,45 @@ def _scopes_subset(child: list[str], parent: list[str]) -> bool:
 
 
 def issue_user_token(user_id: str, kind: str, ttl_minutes: int) -> str:
-    """Single-use account token (verify/reset); hash stored, raw shown once."""
+    """Single-use account token (verify/reset); hash stored, raw shown once.
+
+    Issuing a replacement invalidates the user's previous UNUSED tokens of the
+    same kind (rotation). Only hashes are stored.
+    """
     raw = secrets.token_urlsafe(32)
     with session_scope() as s:
+        now = datetime.now(timezone.utc)
+        # rotate: invalidate prior unused tokens of this kind
+        s.execute(update(UserToken)
+                  .where(UserToken.user_id == user_id, UserToken.kind == kind,
+                         UserToken.used_at.is_(None))
+                  .values(used_at=now))
         s.add(UserToken(id=new_id("utk"), user_id=user_id, kind=kind,
                         token_hash=_hash_token(raw),
-                        expires_at=datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)))
+                        expires_at=now + timedelta(minutes=ttl_minutes)))
     return raw
 
 
 def consume_user_token(raw: str, kind: str) -> str | None:
-    """Single-use consumption; returns user_id or None. Constant-time hash lookup."""
+    """Atomic single-use consumption (Phase 5).
+
+    The claim is an UPDATE guarded by used_at IS NULL and expiry, so only ONE
+    concurrent request can consume a token; the winner is decided by the
+    database row lock, not by a read-then-write race.
+    """
     th = _hash_token(raw)
+    now = datetime.now(timezone.utc)
     with session_scope() as s:
-        rows = s.scalars(select(UserToken).where(UserToken.token_hash == th,
-                                                 UserToken.kind == kind)).all()
-        now = datetime.now(timezone.utc)
-        for t in rows:
-            exp = t.expires_at if t.expires_at.tzinfo else t.expires_at.replace(tzinfo=timezone.utc)
-            if t.used_at is None and exp > now:
-                t.used_at = now
-                return t.user_id
-    return None
+        res = s.execute(
+            update(UserToken)
+            .where(UserToken.token_hash == th, UserToken.kind == kind,
+                   UserToken.used_at.is_(None), UserToken.expires_at > now)
+            .values(used_at=now))
+        if (res.rowcount or 0) != 1:
+            return None
+        row = s.execute(select(UserToken.user_id)
+                        .where(UserToken.token_hash == th, UserToken.kind == kind)).first()
+        return row[0] if row else None
 
 
 def resolve_token(token: str) -> tuple[User | None, AuthToken | None]:
