@@ -27,7 +27,7 @@ jobs:
           OPENAI_API_KEY: "sk-offline-fake-key-not-real"
           ANTHROPIC_API_KEY: "sk-ant-offline-fake-not-real"
         run: |
-          python -m pytest tests -q --ignore=tests/test_browser_workflows.py `
+          python -m pytest tests -q --ignore=tests/test_browser_workflows.py \
             --junitxml=test-results-offline.xml
       - name: Upload test report
         if: always()

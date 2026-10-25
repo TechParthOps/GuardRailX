@@ -2,7 +2,7 @@
 
 - Audit object: supplied repository at baseline commit `dbc5150`
 - Method: static review + dynamic reproduction (PoC scripts against isolated temp DB) + regression tests
-- Result: **8 confirmed vulnerabilities, all remediated with regression tests; 127 tests passing**
+- Result: **8 confirmed vulnerabilities, all remediated with regression tests (audit-time baseline; current suite: see docs/TEST_REPORT.md — counts evolve as coverage grows and are not restated here to avoid stale claims)**
 
 ## Confirmed findings
 

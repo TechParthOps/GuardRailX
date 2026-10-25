@@ -4,6 +4,12 @@
 > `mock` adapter. These are real executed experiment records, not hand-written results.
 > The mock adapter is scripted to leak canaries; findings here demonstrate the pipeline,
 > not properties of any real model.
+>
+> Sanitization notes: all identifiers below (experiments, cases, targets, canaries) are
+> synthetic values generated inside the isolated test environment. The "live-provider
+> run" section references only public model catalog names executed under the operator's
+> own authorized account; no credentials, account details, or private endpoints appear
+> in this report.
 
 - Experiment: `exp_e55430394faf4a5895af` — Benchmark suite 'safety-core'
 - Status: completed | started 2026-10-23 11:30:13.276342 | finished 2026-10-23 11:30:13.344257

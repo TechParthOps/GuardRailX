@@ -1,6 +1,6 @@
 # Remediation checklist — final release blockers (Phase 1)
 
-Baseline: commit `7835219`, **128 passed / 0 failed / 0 skipped** (this environment has DNS;
+Baseline: commit `7835219`, **128 passed / 0 failed / 0 skipped at that baseline point** (historical context only; current counts: docs/TEST_REPORT.md. This environment has DNS;
 the reported 6 failures/4 skips in the audit environment were DNS-dependent tests — fixed in Phase 9).
 
 | # | Phase | Defect (verified before fixing) | Files | Regression test | Status |
