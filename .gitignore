@@ -1,21 +1,41 @@
-# runtime data & secrets (never commit)
+# ---- secrets & local configuration (never commit) ----
+.env
+.env.*
+!.env.example
 data/
+secret_key*
+initial_admin_password*
+*.pem
+*.key
+
+# ---- runtime state ----
 *.db
 *.db-wal
 *.db-shm
+*.sqlite*
 *.pid
-secret_key*
-initial_admin_password*
 *.log
+dist/
+build/
+*.backup
+*.bak
 
-# python
+# ---- python ----
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+env/
 
-# local env & tooling
-.env
+# ---- tooling & OS artifacts ----
 .DS_Store
-dist/
+Thumbs.db
+.idea/
+.vscode/
+*.swp

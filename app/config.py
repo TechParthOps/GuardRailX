@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # --- account policies ---------------------------------------------------
     allow_signup: bool = True              # public registration toggle
     require_email_verification: bool = False  # enable for production with SMTP delivery
+    allow_password_reset: bool = True      # self-serve reset; requires delivery when enabled
     # --- account-token delivery (Phase 5) -----------------------------------
     email_mode: str = "console"            # console (dev) | smtp
     smtp_host: str = ""
@@ -86,16 +87,22 @@ class Settings(BaseSettings):
             return errors
         if not self.secret_key:
             errors.append("GX_SECRET_KEY must be set explicitly in production")
+        elif len(self.secret_key) < 32:
+            errors.append("GX_SECRET_KEY is too short for production (use >= 32 random bytes, "
+                          "e.g. python -c \"import secrets; print(secrets.token_urlsafe(48))\")")
         if self.cors_origins == "*":
             errors.append("GX_CORS_ORIGINS must list explicit trusted origins in production")
         if self.seed_demo_data:
             errors.append("GX_SEED_DEMO_DATA must be false in production")
-        # Phase 5: never promise verification/reset flows without real delivery
-        if self.require_email_verification or self.email_mode == "smtp":
+        # Priority 0: ANY enabled account-token workflow needs secure delivery.
+        # Password reset is enabled by default, so production must configure
+        # SMTP — or explicitly disable the reset workflow.
+        if (self.require_email_verification or self.allow_password_reset
+                or self.email_mode == "smtp"):
             from app.mailer import delivery_ready
             ok, why = delivery_ready()
             if not ok:
-                errors.append(f"email delivery misconfigured: {why}")
+                errors.append(f"account-token delivery misconfigured: {why}")
         return errors
 
     def allowed_key_envs_list(self) -> list[str]:

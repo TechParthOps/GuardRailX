@@ -60,8 +60,18 @@ def _smtp_send(to: str, subject: str, body: str) -> None:
 
 
 def send_account_token(email: str, kind: str, raw_token: str) -> None:
-    """Deliver a verification/reset token. NEVER log or return the token."""
+    """Deliver a verification/reset token. NEVER log or return the token.
+
+    Fail-closed (Priority 0): console delivery is permitted ONLY outside
+    production. In production, a raw token must never reach stdout/logs —
+    this holds even when email verification is disabled, because the
+    password-reset workflow remains available by default.
+    """
     s = get_settings()
+    if s.environment == "production" and s.email_mode != "smtp":
+        raise DeliveryError(
+            "account-token delivery is not configured for production "
+            "(GX_EMAIL_MODE must be 'smtp' with GX_SMTP_HOST set)")
     purpose = "email verification" if kind == "verify_email" else "password reset"
     minutes = s.verification_token_ttl_minutes if kind == "verify_email" \
         else s.reset_token_ttl_minutes
@@ -76,21 +86,32 @@ def send_account_token(email: str, kind: str, raw_token: str) -> None:
             raise DeliveryError(
                 f"{purpose} token could not be delivered; try again later") from exc
         return
-    # console mode (development): single labeled console line, not structured logs
+    # console mode (development/tests only): single labeled console line,
+    # never structured logs, never returned via API
     print(f"[account-token delivery mode=console] {purpose} token for {email}: {raw_token}",
           flush=True)
 
 
 def delivery_ready() -> tuple[bool, str]:
-    """Whether the configured delivery path can actually deliver (startup check)."""
+    """Whether the configured delivery path can actually deliver (startup check).
+
+    Console mode is development-only: production requires verified SMTP
+    configuration whenever ANY token workflow is enabled (signup verification
+    or password reset — the latter is always on unless explicitly disabled).
+    """
     s = get_settings()
+    token_workflows_enabled = s.allow_password_reset or s.require_email_verification
     if s.email_mode == "smtp":
         if not s.smtp_host:
             return False, "GX_EMAIL_MODE=smtp but GX_SMTP_HOST is not configured"
+        if not s.smtp_from or "@" not in s.smtp_from:
+            return False, "GX_SMTP_FROM must be a valid sender address"
         return True, "smtp configured"
     if s.email_mode == "console":
-        if s.environment == "production" and s.require_email_verification:
-            return False, ("console token delivery is not acceptable for production with "
-                           "GX_REQUIRE_EMAIL_VERIFICATION=true; configure SMTP")
+        if s.environment == "production":
+            if token_workflows_enabled:
+                return False, ("console token delivery is not permitted in production; "
+                               "configure SMTP (GX_EMAIL_MODE=smtp, GX_SMTP_HOST)")
+            return True, "console mode (no token workflows enabled)"
         return True, "console mode (development)"
     return False, f"unknown GX_EMAIL_MODE '{s.email_mode}'"

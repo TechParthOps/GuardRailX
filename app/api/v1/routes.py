@@ -193,6 +193,9 @@ def resend_verification(body: S.RequestResetRequest, _rl: None = Depends(auth_ra
 @router.post("/auth/request-password-reset", tags=["auth"])
 def request_password_reset(body: S.RequestResetRequest, _rl: None = Depends(auth_rate_limit("reset", 10))) -> dict[str, Any]:
     """Always returns a generic response (no account enumeration)."""
+    if not get_settings().allow_password_reset:
+        # workflow explicitly disabled by the operator (e.g. no delivery configured)
+        return {"ok": True, "message": "if the account exists, a reset token was issued"}
     try:
         e = authsvc.normalize_email(body.email)
     except ValueError:
@@ -208,6 +211,9 @@ def request_password_reset(body: S.RequestResetRequest, _rl: None = Depends(auth
 
 @router.post("/auth/reset-password", tags=["auth"])
 def reset_password(body: S.ResetPasswordRequest, _rl: None = Depends(auth_rate_limit("reset", 10))) -> dict[str, Any]:
+    if not get_settings().allow_password_reset:
+        # workflow explicitly disabled by the operator: do not consume tokens
+        raise HTTPException(403, "password reset is disabled on this deployment")
     policy = authsvc.password_policy_error(body.password)
     if policy:
         raise HTTPException(422, policy)

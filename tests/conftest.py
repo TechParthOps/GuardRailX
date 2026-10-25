@@ -1,6 +1,9 @@
 import os
+import socket
 import sys
 import tempfile
+import threading
+import time
 
 TMP = tempfile.mkdtemp(prefix="gx_test_")
 os.environ["GX_DATA_DIR"] = TMP
@@ -109,6 +112,16 @@ def run_experiment_sync(exp_id):
     asyncio.run(orch.run_experiment(exp_id))
 
 @pytest.fixture(autouse=True)
+def _offline_provider_credentials(monkeypatch):
+    """Fake provider credentials so mocked adapter tests never require real
+    keys (Priority 0: reproducibility in a clean environment). Values are
+    clearly synthetic; no adapter test performs a real network call."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-offline-fake-key-not-real")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-offline-fake-not-real")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_auth_rate_store():
     """Auth rate limits are per-IP; tests share one client IP. Clear before and
     after each test so unrelated tests stay deterministic (the dedicated
@@ -146,3 +159,79 @@ def _offline_dns_guard(monkeypatch):
 
     monkeypatch.setattr(_socket, "getaddrinfo", offline_getaddrinfo)
     yield
+
+class SMTPCaptureServer(threading.Thread):
+    """Minimal SMTP server capturing DATA payloads (RFC 5321 subset)."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.messages: list[dict] = []
+        self._sock = socket.socket()
+        self._sock.bind(("127.0.0.1", 0))
+        self.port = self._sock.getsockname()[1]
+        self._sock.listen(1)
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            with conn:
+                f = conn.makefile("rwb")
+                conn.sendall(b"220 capture ready\r\n")
+                data_mode = False
+                envelope: dict = {"from": "", "to": "", "data": []}
+                try:
+                    for line in f:
+                        if self._stop.is_set():
+                            return
+                        if data_mode:
+                            if line.strip() == b".":
+                                data_mode = False
+                                self.messages.append({**envelope, "data": b"\n".join(envelope["data"]).decode()})
+                                conn.sendall(b"250 queued\r\n")
+                            else:
+                                envelope["data"].append(line.replace(b"\r\n", b"\n"))
+                            continue
+                        cmd = line.strip().decode(errors="replace").upper()
+                        if cmd.startswith("EHLO") or cmd.startswith("HELO"):
+                            conn.sendall(b"250-capture\r\n250 OK\r\n")
+                        elif cmd.startswith("MAIL FROM"):
+                            envelope["from"] = cmd.split(":", 1)[-1].strip()
+                            conn.sendall(b"250 OK\r\n")
+                        elif cmd.startswith("RCPT TO"):
+                            envelope["to"] = cmd.split(":", 1)[-1].strip()
+                            conn.sendall(b"250 OK\r\n")
+                        elif cmd.startswith("DATA"):
+                            data_mode = True
+                            conn.sendall(b"354 end with .\r\n")
+                        elif cmd.startswith("QUIT"):
+                            conn.sendall(b"221 bye\r\n")
+                            break
+                        elif cmd.startswith("STARTTLS"):
+                            conn.sendall(b"454 TLS not supported by capture\r\n")
+                        else:
+                            conn.sendall(b"250 OK\r\n")
+                except (ConnectionResetError, OSError):
+                    return  # client closed mid-session (normal at teardown)
+
+    def stop(self):
+        self._stop.set()
+        try:
+            socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+        except Exception:
+            pass
+        self._sock.close()
+
+
+@pytest.fixture()
+def smtp_server():
+    s = SMTPCaptureServer()
+    s.start()
+    time.sleep(0.2)
+    yield s
+    s.stop()
+
+
