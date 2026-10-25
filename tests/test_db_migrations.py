@@ -1,7 +1,7 @@
 """PostgreSQL migration integration tests (Phase 2).
 
 Each scenario runs in a subprocess against a real PostgreSQL instance
-(docker: gx-pg-test on localhost:55432) or SQLite, using isolated databases.
+(docker: gx-pg-test on localhost:25432) or SQLite, using isolated databases.
 Skipped with an explicit reason when PostgreSQL is unavailable — the rest of
 the suite remains fully offline.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PG_URL = os.environ.get("GX_TEST_PG_URL", "postgresql+psycopg://postgres:test-pg-pass@127.0.0.1:55432/postgres")
+PG_URL = os.environ.get("GX_TEST_PG_URL", "postgresql+psycopg://postgres:test-pg-pass@127.0.0.1:25432/postgres")
 
 PG_AVAILABLE = None
 
@@ -23,7 +23,7 @@ def pg_available() -> bool:
     if PG_AVAILABLE is None:
         try:
             import psycopg
-            with psycopg.connect("postgresql://postgres:test-pg-pass@127.0.0.1:55432/postgres",
+            with psycopg.connect("postgresql://postgres:test-pg-pass@127.0.0.1:25432/postgres",
                                  connect_timeout=3) as c:
                 c.execute("SELECT 1")
             PG_AVAILABLE = True
@@ -56,7 +56,7 @@ assert "scopes" in cols
 with db.engine.begin() as c:
     c.execute(text("INSERT INTO users (id, email, password_hash, role, disabled, email_verified) VALUES ('u1','a@b.c','x','admin',FALSE,TRUE)"))
     r = c.execute(text("SELECT version FROM schema_migrations ORDER BY version")).fetchall()
-assert [x[0] for x in r] == [1]
+assert [x[0] for x in r] == [1, 2]
 print("FRESH_OK")
 """
 
@@ -195,7 +195,7 @@ print("NODEMO_OK")
 
 def _fresh_pg_db(name):
     import psycopg
-    with psycopg.connect("postgresql://postgres:test-pg-pass@127.0.0.1:55432/postgres",
+    with psycopg.connect("postgresql://postgres:test-pg-pass@127.0.0.1:25432/postgres",
                          autocommit=True) as c:
         c.execute(f'DROP DATABASE IF EXISTS "{name}"')
         c.execute(f'CREATE DATABASE "{name}"')
@@ -216,7 +216,7 @@ def test_compose_url_driver_matches_requirements():
 
 def test_fresh_postgres_initialization():
     if not pg_available():
-        pytest.skip("PostgreSQL test container not available on 127.0.0.1:55432")
+        pytest.skip("PostgreSQL test container not available on 127.0.0.1:25432")
     code, out = run_py(FRESH_PG, _fresh_pg_db("gx_fresh"))
     assert "FRESH_OK" in out, out[-1500:]
 

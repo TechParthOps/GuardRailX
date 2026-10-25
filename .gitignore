@@ -18,3 +18,4 @@ venv/
 # local env & tooling
 .env
 .DS_Store
+dist/

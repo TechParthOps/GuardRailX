@@ -150,8 +150,19 @@ def _m1_rbac_isolation(conn) -> None:
             {"id": "pm_" + secrets.token_hex(8), "p": project_id, "u": owner_id})
 
 
+def _m2_widen_status_columns(conn) -> None:
+    """Widen VARCHAR columns that longer state values overflow on PostgreSQL
+    (`demonstrated_in_test`, `completed_with_failures`). SQLite does not
+    enforce VARCHAR lengths, so this migration is a no-op there."""
+    if not _is_postgres():
+        return
+    conn.execute(text("ALTER TABLE findings ALTER COLUMN likelihood TYPE VARCHAR(40)"))
+    conn.execute(text("ALTER TABLE benchmark_runs ALTER COLUMN status TYPE VARCHAR(32)"))
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _m1_rbac_isolation),
+    (2, _m2_widen_status_columns),
 ]
 
 
