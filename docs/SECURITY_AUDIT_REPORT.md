@@ -63,6 +63,6 @@
 ## Residual risks (documented, accepted for this release)
 
 1. In-memory rate limiter and event bus are per-process (multi-worker needs shared store).
-2. Account-token delivery (verification/reset) is out-of-band (operator console); SMTP not implemented.
+2. Account-token delivery supports SMTP; console delivery is development-only and hard-refused in production. No email API providers (SendGrid/SES) implemented yet.
 3. Demo-data cleanup backups are plain files on disk; encrypt at rest per deployment policy.
 4. `GX_ALLOW_LOCAL_ENDPOINTS=true` intentionally permits loopback egress for local model servers — enable only on trusted hosts.

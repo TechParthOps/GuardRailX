@@ -69,12 +69,13 @@ the environment â€” never in target configs or the database.
 ## Account and credential management (hardened release)
 
 - **First admin**: `python -m app.setup` (CLI) or `POST /api/v1/setup` with `GX_SETUP_TOKEN` (one-time; refused after the first admin exists).
-- **Role changes**: `POST /api/v1/admin/users/{id}/role` — effective immediately on all the user's credentials; optionally revokes them.
-- **Disable account**: `POST /api/v1/admin/users/{id}/disable` — sign-in refused and live sessions invalidated instantly.
+- **Role changes**: `POST /api/v1/admin/users/{id}/role` ï¿½ effective immediately on all the user's credentials; optionally revokes them.
+- **Disable account**: `POST /api/v1/admin/users/{id}/disable` ï¿½ sign-in refused and live sessions invalidated instantly.
 - **Password policy**: 12+ chars with upper/lower/digit; Argon2id storage; legacy PBKDF2 hashes upgrade transparently at next login.
 - **API keys**: ceiling-enforced (`role` + `scopes`); a key can never mint a credential above its own effective privileges; shown exactly once.
-- **Email verification**: enable `GX_REQUIRE_EMAIL_VERIFICATION=true` for production; tokens are delivered out-of-band (SMTP is not implemented — documented limitation).
+- **Email verification / password reset**: configure `GX_EMAIL_MODE=smtp` + `GX_SMTP_HOST`/`GX_SMTP_FROM` for production. Console delivery (raw tokens to stdout) is development-only and hard-refused in production. Disable self-serve reset with `GX_ALLOW_PASSWORD_RESET=false` if you run without SMTP.
 - **Demo data removal**: `python scripts/cleanup_demo_data.py --dry-run` then `--execute --backup <file> [--revoke-all-credentials]`.
+
 ## Deployment model (Phase 11): single-process by design
 
 The current release is a **single-process deployment**:
@@ -85,7 +86,7 @@ The current release is a **single-process deployment**:
 
 Run exactly ONE uvicorn worker (default of `run.ps1` / compose `CMD`). Running
 `--workers N > 1` or multiple replicas gives inconsistent rate limits, missing
-live events, and duplicated experiment tasks — the app logs a warning at startup
+live events, and duplicated experiment tasks ï¿½ the app logs a warning at startup
 if it detects a multi-worker environment via `GX_EXPECTED_WORKERS`.
 
 Scaling out is a roadmap item (Redis-backed limiter/bus + queue-based

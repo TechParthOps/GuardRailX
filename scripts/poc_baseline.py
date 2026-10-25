@@ -105,7 +105,7 @@ check("GX-002", "Cross-project object access (IDOR)",
       f"direct target read -> {tgt_get.status_code}; visible in list: {visible}")
 
 # --- GX-003: SSRF + arbitrary env credential
-poc_secret = "gx-poc-secret-value-do-not-leak"
+poc_secret = "gx-fake-poc-secret-not-real"
 os.environ["GX_POC_SECRET"] = poc_secret
 evil = client.post("/api/v1/targets", headers=rh, json={
     "project_id": p1["id"], "name": "ssrf-probe", "adapter_name": "openai_compatible",

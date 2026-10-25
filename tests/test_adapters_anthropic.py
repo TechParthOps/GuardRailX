@@ -182,13 +182,13 @@ def test_generate_oversized_response_rejected(adapter, monkeypatch):
 
 
 def test_error_messages_never_contain_credentials(adapter, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-super-secret-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-credential-for-leak-test")
     def handler(req):
-        return httpx.Response(500, text="account sk-ant-super-secret-value quota")
+        return httpx.Response(500, text="account sk-ant-fake-credential-for-leak-test quota")
     monkeypatch.setattr(adapter, "_pinned", _client_factory(handler))
     with pytest.raises(AdapterError) as ei:
         adapter.generate(AdapterRequest(messages=[{"role": "user", "content": "x"}]), {"model": "m"})
-    assert "sk-ant-super-secret-value" not in str(ei.value)
+    assert "sk-ant-fake-credential-for-leak-test" not in str(ei.value)
 
 
 def test_system_messages_promoted_to_system_param(adapter, monkeypatch):

@@ -8,76 +8,108 @@ It evaluates how LLMs and agents respond to adversarial inputs, policy conflicts
 
 ---
 
+## What it does
+
+| Module | Where | What to verify |
+|---|---|---|
+| Adapter framework | `app/adapters/` | `GET /api/v1/adapters`; target connection test marks operational **only** on real success; outbound endpoints pinned and policy-checked |
+| Scenario engine | `app/scenarios/library.py` | 14 builtin scenarios across injection / jailbreak / tool / RAG / policy / multimodal |
+| Experiment orchestrator | `app/experiments/orchestrator.py` | authorization, replays, timeouts, cancellation, emergency stop, transient-failure retry |
+| Policy engine (PDP) | `app/policy/engine.py` | deny > require_approval > allow; unknown tools fail closed; conflict detection |
+| Enforcement gateway (PEP) | `app/tools/gateway.py` | **every** tool action passes it; sandbox escape refused; approvals held |
+| Evaluator + findings | `app/experiments/evaluator.py`, `findings.py` | deterministic outcomes; model vs agent vs enforcement failure layers |
+| Verification & regression | `findings.verify_finding` | evidence re-derived from stored events; confirmed → regression scenario |
+| Benchmarks | `app/benchmarks/runner.py` | documented metrics with explicit numerators/denominators; honest `failed`/`completed_with_failures` states |
+| Observability | `app/observability/` | correlated events, secret redaction, SSE stream |
+| Accounts | `app/auth/`, `app/setup.py`, `app/mailer.py` | public signup (lowest-privilege role), Argon2id, API-key privilege ceilings, project isolation, SMTP token delivery |
+| Dashboard | `static/` | 9 pages, all wired to live endpoints |
+| API | `app/api/v1/routes.py` | versioned REST, OpenAPI at `/api/docs` (dev) |
+
+## Requirements
+
+- **Python 3.11+** (developed and tested on 3.11; other versions are untested)
+- Windows, Linux, or macOS (PowerShell launcher is Windows-only; `uvicorn` works everywhere)
+- Optional: Docker + Docker Compose (PostgreSQL deployment), Playwright + Chromium (browser tests)
+- Optional: a real provider key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `NVIDIA_API_KEY`) for live targets — **not** needed for tests
+
 ## Quickstart (local, no Docker)
 
-```powershell
-# 1. Python 3.11+ and install dependencies
+```bash
+# 1. Install dependencies
 pip install -r requirements.txt -r requirements-dev.txt
 
-# 2. Run the automated test suite (128 tests incl. Playwright browser tests)
-$env:PYTHONPATH = "<repo path>"; python -m pytest tests -q
+# 2. Run the offline test suite (no API keys, no network)
+python -m pytest tests -q --ignore=tests/test_browser_workflows.py
 
 # 3. Create the FIRST administrator (no default identity ships with the app)
 python -m app.setup            # interactive: email + password
 #    or via API: set GX_SETUP_TOKEN, then POST /api/v1/setup (one-time)
 
-# 4. Start the platform (kills any previous instance on the port automatically)
-.\run.ps1            # or: .\run.ps1 -Port 9000
+# 4. Start the platform
+#    Linux/macOS:  uvicorn app.main:app --port 8899
+#    Windows:      .\run.ps1            (kills any previous instance on the port)
+#                  .\run.ps1 -Port 9000
 
-# 5. Open the dashboard and sign in
-#    http://127.0.0.1:8899
+# 5. Open the dashboard and sign in:  http://127.0.0.1:8899
 #    Users can self-register at #/signup (GX_ALLOW_SIGNUP, role: viewer; admins
 #    grant roles afterwards). Demo data only when GX_SEED_DEMO_DATA=true.
-#
-# If the browser ever shows a stale page, hard-refresh with Ctrl+F5.
 ```
 
-**Security posture (hardened release):** no default admin identity; Argon2id password hashing
-with transparent legacy upgrade; effective-privilege ceiling on every credential (a scoped key
-can never mint a wider one); project-level isolation on every resource route; SSRF allowlist for
-provider endpoints with credential-host binding; honest benchmark states (`failed` when the
-provider is unavailable); per-route auth rate limits; CSP and security headers. Full details:
-[Security Audit Report](docs/SECURITY_AUDIT_REPORT.md), [Issue Register](docs/ISSUE_REGISTER.md).
+Optional `.env`: copy `.env.example` to `.env`. Adding a real provider key enables live-provider targets — a target only becomes **operational** after a passing connection test.
 
-Optional `.env`: copy `.env.example` to `.env`. Adding `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) enables real-provider targets — a target only becomes **operational** after a passing connection test.
+**Security posture:** no default admin identity; Argon2id password hashing with transparent legacy upgrade; effective-privilege ceiling on every credential (a scoped key can never mint a wider one); project-level isolation on every resource route; SSRF allowlist for provider endpoints with connection-time IP pinning; honest benchmark states (`failed` when the provider is unavailable); per-route auth rate limits; CSP and security headers; production startup fails closed on insecure configuration. Full details: [Security Audit Report](docs/SECURITY_AUDIT_REPORT.md), [Issue Register](docs/ISSUE_REGISTER.md), [Security limitations](docs/SECURITY_LIMITATIONS.md).
 
-## Quickstart (Docker Compose)
+## Quickstart (Docker Compose, PostgreSQL)
 
 ```bash
-cp .env.example .env   # set GX_ADMIN_PASSWORD, optionally provider keys
-docker compose up --build
-# dashboard: http://localhost:8000   (PostgreSQL storage, production-mode headers)
+cp .env.example .env
+# set GX_PG_PASSWORD, GX_SECRET_KEY, GX_CORS_ORIGINS, GX_SETUP_TOKEN
+# production also needs: GX_EMAIL_MODE=smtp + GX_SMTP_HOST/GX_SMTP_FROM
+docker compose up --build -d
+docker compose exec app python -m app.setup   # first administrator
+# dashboard: http://localhost:8000  ·  health: GET /api/v1/ready
 ```
 
-## What it does
+Production startup **refuses** to boot with insecure configuration (missing
+`GX_SECRET_KEY`, wildcard CORS, demo seeding, or missing SMTP delivery while
+account-token workflows are enabled).
 
-| Module | Where | What to verify |
+## Tests
+
+| Group | Command | Needs |
 |---|---|---|
-| Adapter framework | `app/adapters/` | `GET /api/v1/adapters`; target connection test marks operational **only** on real success |
-| Scenario engine | `app/scenarios/library.py` | 14 builtin scenarios across injection / jailbreak / tool / RAG / policy / multimodal |
-| Experiment orchestrator | `app/experiments/orchestrator.py` | authorization, replays, timeouts, cancellation, emergency stop |
-| Policy engine (PDP) | `app/policy/engine.py` | deny > require_approval > allow; unknown tools fail closed; conflict detection |
-| Enforcement gateway (PEP) | `app/tools/gateway.py` | **every** tool action passes it; sandbox escape refused; approvals held |
-| Evaluator + findings | `app/experiments/evaluator.py`, `findings.py` | deterministic outcomes; model vs agent vs enforcement failure layers |
-| Verification & regression | `findings.verify_finding` | evidence re-derived from stored events; confirmed → regression scenario |
-| Benchmarks | `app/benchmarks/runner.py` | documented metrics with explicit numerators/denominators |
-| Observability | `app/observability/` | correlated events, secret redaction, SSE stream |
-| Dashboard | `static/` | 9 pages, all wired to live endpoints |
-| API | `app/api/v1/routes.py` | versioned REST, OpenAPI at `/api/docs` |
+| Offline unit/API/integration | `python -m pytest tests -q --ignore=tests/test_browser_workflows.py` | nothing (fake credentials injected by fixtures; DNS blocked when `GX_OFFLINE_TEST=1`) |
+| Browser workflows | `pip install playwright && python -m playwright install chromium` then `python -m pytest tests/test_browser_workflows.py -q` | Playwright + Chromium |
+| PostgreSQL migrations | `GX_TEST_PG_URL=postgresql+psycopg://... python -m pytest tests/test_db_migrations.py -q` | a disposable PostgreSQL (never production) |
+| Full suite | `python -m pytest tests -q` | Playwright installed |
 
-## Security model in one paragraph
-
-The control plane (policy, approvals, experiments) is separate from the execution plane (sandboxed tool executor). A tested agent cannot modify its own permissions, rewrite the audit trail, or disable the gateway — it can only *propose* actions, and the gateway decides. Destructive tools are policy-denied by default; network egress requires human approval; there is no shell tool; `real` execution mode is limited to read-only access inside `data/sandbox/`. Everything else is labeled `simulated` in the trace.
+CI runs the offline suite, packaging rules, browser tests, and PostgreSQL
+migrations as separate jobs (`.github/workflows/ci.yml`). The most recent
+executed results live in [docs/TEST_REPORT.md](docs/TEST_REPORT.md).
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — modules, data flow, trade-offs
 - [Threat model](docs/THREAT_MODEL.md) — trust boundaries, attack surfaces
-- [Adapter guide](docs/ADAPTER_GUIDE.md) — adding providers/protocols
-- [Scenario guide](docs/SCENARIO_GUIDE.md) — writing scenarios and evaluators
-- [API](docs/API.md) + live OpenAPI at `/api/docs`
-- [Security limitations](docs/SECURITY_LIMITATIONS.md) — known gaps, read before relying on results
+- [Operations](docs/OPERATIONS.md) — deployment, configuration, troubleshooting, backup
+- [Data model](docs/DATA_MODEL.md) · [API](docs/API.md) (live OpenAPI at `/api/docs` in development)
+- [Adapter guide](docs/ADAPTER_GUIDE.md) · [Scenario guide](docs/SCENARIO_GUIDE.md)
+- [Security audit report](docs/SECURITY_AUDIT_REPORT.md) · [Issue register](docs/ISSUE_REGISTER.md) · [Security limitations](docs/SECURITY_LIMITATIONS.md)
+- [Test report](docs/TEST_REPORT.md) · [Sample report](docs/SAMPLE_REPORT.md) (labeled demo data)
 
-## Test status
+## Current limitations
 
-Hardened release: **128 passed** (pytest, incl. Playwright browser tests) covering the policy engine, enforcement gateway, adapters (OpenAI-compatible over mocked HTTP), orchestrator E2E, findings/regression, benchmarks, RBAC, project isolation, SSRF boundaries, redaction, emergency stop, and real-browser workflows. Live-provider evidence: `docs/TEST_REPORT.md`, `docs/SAMPLE_REPORT.md`, `docs/SECURITY_LIMITATIONS.md`.
+Single-process deployment (in-memory rate limiting + SSE bus — run one worker);
+account-token delivery via SMTP only (no email API providers yet); real network
+egress intentionally unimplemented in the tool executor (approved actions run
+simulated); no encryption at rest. Full list: `docs/SECURITY_LIMITATIONS.md`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md) — no public issues for vulnerabilities.
+
+## License
+
+[MIT](LICENSE) — provisionally selected for the initial public release; the
+owner may relicense before external contributions arrive (note inside
+`LICENSE`).
