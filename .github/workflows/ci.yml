@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  offline-tests:
+    name: Offline tests (no credentials, no network)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run offline test suite (DNS blocked)
+        env:
+          GX_OFFLINE_TEST: "1"
+          # clearly fake credentials: adapter config validation requires the
+          # variables to EXIST; no real provider is ever contacted
+          OPENAI_API_KEY: "sk-offline-fake-key-not-real"
+          ANTHROPIC_API_KEY: "sk-ant-offline-fake-not-real"
+        run: |
+          python -m pytest tests -q --ignore=tests/test_browser_workflows.py `
+            --junitxml=test-results-offline.xml
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-test-results
+          path: test-results-offline.xml
+          if-no-files-found: warn
+
+  packaging:
+    name: Release packaging rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify no tracked secrets/artifacts
+        shell: bash
+        run: |
+          if git ls-files | grep -Ei '\.zip$|\.db$|\.pid$|secret_key|initial_admin_password|__pycache__|\.pyc$|^dist/|^data/|\.env$'; then
+            echo "PROHIBITED FILES ARE TRACKED"; exit 1
+          fi
+      - name: Build and verify release archive
+        run: python scripts/make_release.py
+
+  browser-tests:
+    name: Browser tests (Playwright, optional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+          python -m playwright install chromium --with-deps
+      - name: Run browser workflows
+        env:
+          OPENAI_API_KEY: "sk-offline-fake-key-not-real"
+          ANTHROPIC_API_KEY: "sk-ant-offline-fake-not-real"
+        run: python -m pytest tests/test_browser_workflows.py -q
+
+  postgres-migrations:
+    name: PostgreSQL migrations (optional)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test-pg-pass
+          POSTGRES_DB: guardrailx
+        ports:
+          - 25432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Migration and schema tests against real PostgreSQL
+        env:
+          GX_TEST_PG_URL: postgresql+psycopg://postgres:test-pg-pass@127.0.0.1:25432/postgres
+        run: python -m pytest tests/test_db_migrations.py -q
