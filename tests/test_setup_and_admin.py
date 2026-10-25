@@ -167,8 +167,11 @@ def test_concurrent_role_changes_cannot_remove_last_admin(client, admin_headers)
     uid_main = _user_id(ADMIN_EMAIL)
 
     def demote(uid):
+        # revoke_credentials=false: this test targets the last-admin guard,
+        # not session revocation (which would invalidate the shared admin
+        # session used by later tests)
         return client.post(f"/api/v1/admin/users/{uid}/role", headers=admin_headers,
-                           json={"role": "researcher"}).status_code
+                           json={"role": "researcher", "revoke_credentials": False}).status_code
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         codes = list(ex.map(demote, [uid_main, second]))
@@ -177,9 +180,10 @@ def test_concurrent_role_changes_cannot_remove_last_admin(client, admin_headers)
               if u["role"] == "admin" and not u["disabled"]]
     assert len(admins) >= 1, (codes, admins)
     # restore a deterministic state for later tests: main admin re-promoted
+    # (revoke_credentials=false: the shared admin session must survive)
     if not any(u["id"] == uid_main for u in admins):
         client.post(f"/api/v1/admin/users/{uid_main}/role", headers=third_h,
-                    json={"role": "admin"})
+                    json={"role": "admin", "revoke_credentials": False})
     client.post(f"/api/v1/admin/users/{_user_id('conc-admin3@test.local')}/role",
                 headers=third_h, json={"role": "admin"})
 
