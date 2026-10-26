@@ -1,6 +1,6 @@
 # GUARDRAIL-X — Test Execution Report (public-release readiness)
 
-- Date: 2026-10-25
+- Date: 2026-10-26
 - Platform: Windows 11, Python 3.11.9
 - All counts below come from the exact commands listed and are reproducible.
 
@@ -19,6 +19,19 @@ fixture).
 Offline/DNS-blocked run: `GX_OFFLINE_TEST=1` with the same selection →
 **202 passed** (the conftest guard fails any test that attempts real DNS).
 
+### Full-suite run without optional services (skip behavior)
+
+Command: `python -m pytest tests -q -rs` with PostgreSQL unavailable →
+**201 passed, 5 skipped, 0 failed**. Every skip is intentional and explicit:
+
+| Skipped tests | Reason (shown by `-rs`) | Passes when |
+|---|---|---|
+| 5 × `tests/test_db_migrations.py` | "PostgreSQL test container not available on 127.0.0.1:25432" | a disposable PostgreSQL is reachable via `GX_TEST_PG_URL` (Docker: `docker run -d --name gx-pg-test -e POSTGRES_PASSWORD=test-pg-pass -p 25432:5432 postgres:16-alpine`) |
+
+Browser tests skip explicitly with "playwright not installed" / "chromium
+unavailable" when their binaries are absent. No test is ever reported as
+passing while skipped.
+
 ## Stage C — Browser tests
 
 Command: `python -m pytest tests/test_browser_workflows.py -q`
@@ -31,8 +44,10 @@ uvicorn subprocess.
 
 Command: `python -m pytest tests/test_db_migrations.py -q` with a disposable
 PostgreSQL 16 container (`GX_TEST_PG_URL` env var).
-Result: **9 passed** — fresh init, v1→v2 upgrade (PG + SQLite), retry-after-interrupt,
-4-way concurrent migrate, FK/uniqueness, membership preservation.
+Result: **9 passed, 0 skipped** — fresh init, v1→v2 upgrade (PG + SQLite),
+retry-after-interrupt, 4-way concurrent migrate, FK/uniqueness, membership
+preservation. The 5 container-dependent tests pass (not skip) with the
+service available.
 
 Docker Compose end-to-end: `docker compose up --build -d` with production env →
 healthy → first-admin setup → researcher workflow → experiment `completed`
@@ -43,7 +58,7 @@ release cycle.
 
 Command: `python scripts/make_release.py`
 Result: built from committed HEAD on a clean tree; **verification PASS**
-(116+ entries, single top-level dir, no prohibited artifacts, all required
+(single top-level directory, no prohibited artifacts, all required
 files, no nested archives, `.env.example` free of secret values, SHA-256 written).
 Extraction smoke test: unzipped into a fresh temp dir → offline suite from the
 extracted source → **202 passed** (proves no dependency on the developer's workspace).
