@@ -39,3 +39,18 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+# Pytest cache
+.pytest_cache/
+
+# Local databases and backups
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*backup*
+
+# Local secret key
+data/secret_key
+
+# Generated release artifacts
+dist/
+build/
