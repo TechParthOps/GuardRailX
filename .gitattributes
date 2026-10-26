@@ -1,0 +1,17 @@
+# Normalize line endings: all text files are stored with LF in the repository.
+# This prevents phantom whitespace diffs when working trees are moved between
+# operating systems or round-tripped through archives.
+* text=auto
+
+# Windows-only scripts must keep CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary artifacts (never normalize)
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.db binary
+*.whl binary
